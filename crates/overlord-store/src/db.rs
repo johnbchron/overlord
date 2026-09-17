@@ -23,8 +23,8 @@ fn migrations() -> Migrations<'static> {
 /// serializing writes is not a limitation to be engineered around — it
 /// is the thing that makes the sequence meaningful.
 pub struct Db {
-  source: Source,
-  writer: Mutex<Connection>,
+  source:  Source,
+  writer:  Mutex<Connection>,
   readers: Mutex<Vec<Connection>>,
   /// Kept open for an in-memory database so the shared-cache database
   /// outlives any individual connection.
@@ -51,9 +51,7 @@ impl Source {
     })
   }
 
-  fn is_file(&self) -> bool {
-    matches!(self, Self::File(_))
-  }
+  fn is_file(&self) -> bool { matches!(self, Self::File(_)) }
 }
 
 impl Db {
@@ -215,18 +213,14 @@ impl Writer<'_> {
     Ok(first)
   }
 
-  pub(crate) fn conn(&self) -> &Transaction<'_> {
-    self.tx
-  }
+  pub(crate) fn conn(&self) -> &Transaction<'_> { self.tx }
 
   /// Read through this transaction, seeing its uncommitted writes.
   ///
   /// Evaluation runs inside the sweep's transaction and needs the read
   /// models — the facts it is evaluating are not committed yet.
   #[must_use]
-  pub fn reader(&self) -> Reader<'_> {
-    Reader { conn: self.tx }
-  }
+  pub fn reader(&self) -> Reader<'_> { Reader { conn: self.tx } }
 }
 
 /// A read-only view of the store.
@@ -241,9 +235,7 @@ impl Reader<'_> {
   /// models do not cover — exports, diagnostics, and tests that need to
   /// compare whole tables. Writes go through [`Writer`], never here.
   #[must_use]
-  pub fn conn(&self) -> &Connection {
-    self.conn
-  }
+  pub fn conn(&self) -> &Connection { self.conn }
 }
 
 /// Store a payload by content hash, returning the hash.

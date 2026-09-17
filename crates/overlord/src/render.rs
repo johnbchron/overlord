@@ -41,8 +41,8 @@ pub fn sweep(out: &SweepOutcome) {
 
   let e = &out.evaluation;
   println!(
-    "  evaluated {} subjects: {} opened, {} regressed, {} still open, \
-     {} resolved",
+    "  evaluated {} subjects: {} opened, {} regressed, {} still open, {} \
+     resolved",
     e.subjects_evaluated, e.opened, e.regressed, e.standing, e.resolved
   );
   if e.expired > 0 {

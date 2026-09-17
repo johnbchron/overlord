@@ -27,26 +27,22 @@ pub struct Scenario {
   pub system_kind: SystemKind,
   #[serde(default = "default_entity_type")]
   pub entity_type: String,
-  pub stages: Vec<Stage>,
+  pub stages:      Vec<Stage>,
 }
 
-fn default_kind() -> SystemKind {
-  SystemKind::Workspace
-}
+fn default_kind() -> SystemKind { SystemKind::Workspace }
 
-fn default_entity_type() -> String {
-  "user".to_owned()
-}
+fn default_entity_type() -> String { "user".to_owned() }
 
 /// What the connector reports on one sweep.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Stage {
   #[serde(default)]
-  pub note: Option<String>,
+  pub note:    Option<String>,
   /// Simulate a connector failure. The sweep records a failed system
   /// without corrupting other systems' results.
   #[serde(default)]
-  pub fail: Option<String>,
+  pub fail:    Option<String>,
   /// Set to record a partial snapshot, which may never produce
   /// tombstones.
   #[serde(default)]
@@ -58,7 +54,7 @@ pub struct Stage {
 /// Per-system configuration for this connector.
 #[derive(Debug, Clone, Deserialize)]
 struct Config {
-  path: PathBuf,
+  path:  PathBuf,
   /// Which stage to serve. Stages past the end repeat the last one, so
   /// a two-stage scenario can be swept any number of times.
   #[serde(default)]
@@ -70,9 +66,7 @@ pub struct FixtureConnector;
 
 impl FixtureConnector {
   #[must_use]
-  pub fn new() -> Self {
-    Self
-  }
+  pub fn new() -> Self { Self }
 
   /// Read the scenario named by a system's configuration.
   ///
@@ -85,26 +79,18 @@ impl FixtureConnector {
   }
 
   #[must_use]
-  pub fn boxed() -> Box<dyn Connector> {
-    Box::new(Self)
-  }
+  pub fn boxed() -> Box<dyn Connector> { Box::new(Self) }
 }
 
 #[async_trait]
 impl Connector for FixtureConnector {
-  fn name(&self) -> &'static str {
-    "fixture"
-  }
+  fn name(&self) -> &'static str { "fixture" }
 
-  fn system_kind(&self) -> SystemKind {
-    SystemKind::Workspace
-  }
+  fn system_kind(&self) -> SystemKind { SystemKind::Workspace }
 
   /// Empty, and meaningfully so: a connector with no allowlisted
   /// endpoints can reach nothing at all.
-  fn allowlist(&self) -> Vec<Allow> {
-    Vec::new()
-  }
+  fn allowlist(&self) -> Vec<Allow> { Vec::new() }
 
   fn base_url(&self, _: &ObserveCtx) -> String {
     "https://fixture.invalid/".to_owned()
@@ -185,9 +171,9 @@ mod tests {
 
   fn ctx(path: &str, stage: usize) -> ObserveCtx {
     ObserveCtx {
-      system: SystemId::new("fix"),
+      system:     SystemId::new("fix"),
       started_at: "2026-01-15T00:00:00Z".parse::<Timestamp>().unwrap(),
-      config: serde_json::json!({ "path": path, "stage": stage }),
+      config:     serde_json::json!({ "path": path, "stage": stage }),
     }
   }
 

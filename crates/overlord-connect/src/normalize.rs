@@ -19,10 +19,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FieldRule {
   /// Dotted path into the raw payload.
-  pub path: String,
+  pub path:    String,
   /// What the value should become. Absent means "leave it as it is".
   #[serde(rename = "as", default)]
-  pub coerce: Option<Coerce>,
+  pub coerce:  Option<Coerce>,
   /// Used when the path is missing. Absent means the field is null,
   /// which is the right default: null is data that was not collected,
   /// and the check language handles it deliberately.
@@ -43,9 +43,9 @@ pub enum Coerce {
 /// How to map a vendor's lifecycle state onto the five overlord knows.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StatusRule {
-  pub path: String,
+  pub path:    String,
   /// Keyed by the raw value's string form, so `true` maps as `"true"`.
-  pub map: BTreeMap<String, EntityStatus>,
+  pub map:     BTreeMap<String, EntityStatus>,
   /// What an unmapped value becomes. A connector that cannot map a
   /// vendor state must land on `unknown` rather than guessing:
   /// `status == "active"` appears in nearly every check, so a wrong
@@ -54,31 +54,29 @@ pub struct StatusRule {
   pub default: EntityStatus,
 }
 
-fn unknown_status() -> EntityStatus {
-  EntityStatus::Unknown
-}
+fn unknown_status() -> EntityStatus { EntityStatus::Unknown }
 
 /// A versioned normalization ruleset.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Ruleset {
-  pub id: String,
-  pub version: String,
-  pub system_kind: SystemKind,
-  pub entity_type: String,
+  pub id:           String,
+  pub version:      String,
+  pub system_kind:  SystemKind,
+  pub entity_type:  String,
   /// Where the stable key within the system comes from.
-  pub entity_key: FieldRule,
+  pub entity_key:   FieldRule,
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub display_name: Option<FieldRule>,
-  pub status: StatusRule,
+  pub status:       StatusRule,
   /// Everything else, flat at the root of the overlay.
   #[serde(default)]
-  pub fields: BTreeMap<String, FieldRule>,
+  pub fields:       BTreeMap<String, FieldRule>,
 }
 
 /// The result of normalizing one payload.
 #[derive(Debug, Clone)]
 pub struct Normalized {
-  pub record: NormalizedRecord,
+  pub record:   NormalizedRecord,
   /// Values the ruleset could not convert. Surfaced on the coverage
   /// view rather than dropped: a timestamp that silently became null
   /// would make a dormancy check quietly wrong.
@@ -153,8 +151,7 @@ impl Ruleset {
     for (name, rule) in &self.fields {
       if RESERVED_FIELDS.contains(&name.as_str()) {
         warnings.push(format!(
-          "field {name:?} shadows a guaranteed overlay field and was \
-           ignored"
+          "field {name:?} shadows a guaranteed overlay field and was ignored"
         ));
         continue;
       }
@@ -347,14 +344,11 @@ mod tests {
   #[test]
   fn a_rule_cannot_shadow_the_guaranteed_core() {
     let mut rs = ruleset();
-    rs.fields.insert(
-      "status".to_owned(),
-      FieldRule {
-        path: "whatever".to_owned(),
-        coerce: None,
-        default: None,
-      },
-    );
+    rs.fields.insert("status".to_owned(), FieldRule {
+      path:    "whatever".to_owned(),
+      coerce:  None,
+      default: None,
+    });
     let n = rs
       .apply(
         &SystemId::new("gws-prod"),

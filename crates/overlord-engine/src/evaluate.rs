@@ -18,22 +18,22 @@ use crate::{error::Result, world::World};
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EvalReport {
   pub subjects_evaluated: usize,
-  pub opened: usize,
-  pub regressed: usize,
-  pub resolved: usize,
-  pub standing: usize,
-  pub expired: usize,
-  pub ambiguous: usize,
+  pub opened:             usize,
+  pub regressed:          usize,
+  pub resolved:           usize,
+  pub standing:           usize,
+  pub expired:            usize,
+  pub ambiguous:          usize,
   /// Conditions that would not compile, or that failed against a
   /// subject. Rule-quality signals, not violations.
-  pub errors: Vec<CheckProblem>,
+  pub errors:             Vec<CheckProblem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckProblem {
   pub check_id: CheckId,
-  pub subject: Option<String>,
-  pub message: String,
+  pub subject:  Option<String>,
+  pub message:  String,
 }
 
 /// Evaluate every pinned check against every in-scope subject.
@@ -47,9 +47,9 @@ pub fn evaluate_sweep(w: &Writer<'_>, sweep: SweepId) -> Result<EvalReport> {
   let now = r.sweep_started_at(sweep)?;
   let mut report = EvalReport::default();
 
-  // 1. Expiry first, against the sweep's start time, so a suppression
-  //    that has run out is reopened before the condition is retested —
-  //    and resolved in the same pass if it no longer holds.
+  // 1. Expiry first, against the sweep's start time, so a suppression that has
+  //    run out is reopened before the condition is retested — and resolved in
+  //    the same pass if it no longer holds.
   for (check_id, subject_ref, episode) in r.expired_suppressions(now)? {
     w.expire_suppression(&check_id, &subject_ref, episode, now, sweep)?;
     report.expired += 1;
@@ -59,7 +59,7 @@ pub fn evaluate_sweep(w: &Writer<'_>, sweep: SweepId) -> Result<EvalReport> {
   let swept: BTreeSet<SystemId> = r
     .swept_systems(sweep)?
     .into_iter()
-    .map(|(id, _, _)| id)
+    .map(|(id, ..)| id)
     .collect();
   let known: Vec<(SystemId, SystemKind)> = r.known_systems()?;
   let pending: BTreeSet<EntityRef> =
@@ -74,8 +74,8 @@ pub fn evaluate_sweep(w: &Writer<'_>, sweep: SweepId) -> Result<EvalReport> {
       Err(ds) => {
         report.errors.push(CheckProblem {
           check_id: id,
-          subject: None,
-          message: ds
+          subject:  None,
+          message:  ds
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>()
@@ -185,15 +185,15 @@ pub fn evaluate_sweep(w: &Writer<'_>, sweep: SweepId) -> Result<EvalReport> {
 
 /// Everything about one (check, subject) evaluation.
 struct Pass<'a> {
-  id: &'a CheckId,
-  revision: Revision,
-  draft: &'a CheckDraft,
-  program: &'a Program,
+  id:          &'a CheckId,
+  revision:    Revision,
+  draft:       &'a CheckDraft,
+  program:     &'a Program,
   subject_ref: SubjectRef,
-  stale: bool,
-  now: Timestamp,
-  sweep: SweepId,
-  fact_ids: Vec<i64>,
+  stale:       bool,
+  now:         Timestamp,
+  sweep:       SweepId,
+  fact_ids:    Vec<i64>,
 }
 
 fn apply(
@@ -218,16 +218,16 @@ fn apply(
   let existing = w.latest_episode(&check_id, &subject_ref)?;
 
   let facts = EpisodeFacts {
-    check_id: check_id.clone(),
-    subject: pass.subject_ref.clone(),
-    severity: pass.draft.severity,
-    weight: pass.draft.effective_weight(),
-    revision: pass.revision.0,
-    sweep: pass.sweep,
-    at: pass.now,
-    evidence: outcome.evidence,
-    stale: pass.stale,
-    ambiguous: !outcome.ambiguous.is_empty(),
+    check_id:   check_id.clone(),
+    subject:    pass.subject_ref.clone(),
+    severity:   pass.draft.severity,
+    weight:     pass.draft.effective_weight(),
+    revision:   pass.revision.0,
+    sweep:      pass.sweep,
+    at:         pass.now,
+    evidence:   outcome.evidence,
+    stale:      pass.stale,
+    ambiguous:  !outcome.ambiguous.is_empty(),
     eval_error: outcome.outcome.as_ref().err().map(ToString::to_string),
   };
 
@@ -272,8 +272,8 @@ fn apply(
     Err(err) => {
       report.errors.push(CheckProblem {
         check_id: pass.id.clone(),
-        subject: Some(subject_ref.clone()),
-        message: err.to_string(),
+        subject:  Some(subject_ref.clone()),
+        message:  err.to_string(),
       });
       if let Some(e) = &existing
         && e.state != overlord_core::ViolationState::Resolved

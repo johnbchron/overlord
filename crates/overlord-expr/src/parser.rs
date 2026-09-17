@@ -44,21 +44,15 @@ pub fn parse(src: &str) -> Result<Expr, Diagnostic> {
 
 struct Parser {
   tokens: Vec<Token>,
-  pos: usize,
+  pos:    usize,
 }
 
 impl Parser {
-  fn here(&self) -> &Token {
-    &self.tokens[self.pos]
-  }
+  fn here(&self) -> &Token { &self.tokens[self.pos] }
 
-  fn peek(&self) -> &Tok {
-    &self.tokens[self.pos].tok
-  }
+  fn peek(&self) -> &Tok { &self.tokens[self.pos].tok }
 
-  fn span(&self) -> Span {
-    self.tokens[self.pos].span
-  }
+  fn span(&self) -> Span { self.tokens[self.pos].span }
 
   fn bump(&mut self) -> Token {
     let t = self.tokens[self.pos].clone();
@@ -90,9 +84,7 @@ impl Parser {
   }
 
   // or < and < not < comparison < ?? < primary
-  fn expr(&mut self) -> Result<Expr, Diagnostic> {
-    self.or()
-  }
+  fn expr(&mut self) -> Result<Expr, Diagnostic> { self.or() }
 
   fn or(&mut self) -> Result<Expr, Diagnostic> {
     let mut lhs = self.and()?;
@@ -170,8 +162,8 @@ impl Parser {
             ),
           )
           .with_help(
-            "the pattern is compiled when the check is saved, so it \
-             cannot come from the data",
+            "the pattern is compiled when the check is saved, so it cannot \
+             come from the data",
           ),
         );
       };
@@ -325,8 +317,8 @@ impl Parser {
               format!("`{name}` needs a `where` predicate"),
             )
             .with_help(format!(
-              "write `{name}(groups where external)`, or use \
-               `count(...) > 0` to test for any element at all"
+              "write `{name}(groups where external)`, or use `count(...) > 0` \
+               to test for any element at all"
             )),
           );
         };
@@ -363,8 +355,8 @@ impl Parser {
           return Err(
             Diagnostic::new(self.span(), "`entity` takes no `where`")
               .with_help(
-                "`entity(...)` is the operator-designated primary; to \
-                 filter, use `has_entity(... where ...)`",
+                "`entity(...)` is the operator-designated primary; to filter, \
+                 use `has_entity(... where ...)`",
               ),
           );
         }
@@ -447,9 +439,7 @@ impl Parser {
 mod tests {
   use super::*;
 
-  fn err(src: &str) -> Diagnostic {
-    parse(src).unwrap_err()
-  }
+  fn err(src: &str) -> Diagnostic { parse(src).unwrap_err() }
 
   fn ok(src: &str) -> Expr {
     parse(src).unwrap_or_else(|d| panic!("{}", d.render(src)))

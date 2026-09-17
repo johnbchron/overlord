@@ -18,9 +18,7 @@ pub struct Observation {
 
 impl Observation {
   #[must_use]
-  pub fn new(raw: serde_json::Value) -> Self {
-    Self { raw }
-  }
+  pub fn new(raw: serde_json::Value) -> Self { Self { raw } }
 }
 
 /// What a connector returned for one system in one sweep.
@@ -33,7 +31,7 @@ pub struct Snapshot {
   pub completeness: Completeness,
   pub observations: Vec<Observation>,
   /// Non-fatal problems worth surfacing on the coverage view.
-  pub warnings: Vec<String>,
+  pub warnings:     Vec<String>,
 }
 
 impl Snapshot {
@@ -64,12 +62,12 @@ impl Snapshot {
 /// Everything a connector is told about the run it is part of.
 #[derive(Debug, Clone)]
 pub struct ObserveCtx {
-  pub system: SystemId,
+  pub system:     SystemId,
   /// The sweep's start time: the single definition of "now" for the run.
   pub started_at: Timestamp,
   /// This system's entry from the configuration file. Credentials come
   /// from the environment, never from here and never from the streams.
-  pub config: serde_json::Value,
+  pub config:     serde_json::Value,
 }
 
 /// A read-only adapter for one system kind (SPEC.md section 11).
@@ -132,9 +130,7 @@ pub struct Registry {
 
 impl Registry {
   #[must_use]
-  pub fn new() -> Self {
-    Self::default()
-  }
+  pub fn new() -> Self { Self::default() }
 
   #[must_use]
   pub fn with(mut self, c: Box<dyn Connector>) -> Self {

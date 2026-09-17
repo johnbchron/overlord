@@ -197,9 +197,9 @@ impl fmt::Display for ViolationEventKind {
 pub struct EvidenceLeaf {
   /// The source text of the leaf, e.g. `mfa_enrolled` or
   /// `count(groups where external)`.
-  pub expr: String,
+  pub expr:     String,
   /// What it evaluated to.
-  pub value: Value,
+  pub value:    Value,
   /// The facts the value was read from. Usually one; person-scoped
   /// checks reach across several entities and so several facts.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -214,9 +214,7 @@ pub struct Evidence {
 
 impl Evidence {
   #[must_use]
-  pub fn is_empty(&self) -> bool {
-    self.leaves.is_empty()
-  }
+  pub fn is_empty(&self) -> bool { self.leaves.is_empty() }
 
   pub fn push(&mut self, expr: impl Into<String>, value: Value) {
     self.leaves.push(EvidenceLeaf {
@@ -253,9 +251,7 @@ pub enum Completeness {
 
 impl Completeness {
   #[must_use]
-  pub fn is_complete(&self) -> bool {
-    matches!(self, Self::Complete)
-  }
+  pub fn is_complete(&self) -> bool { matches!(self, Self::Complete) }
 
   #[must_use]
   pub fn reason(&self) -> Option<&str> {
@@ -300,8 +296,8 @@ mod tests {
     let mut e = Evidence::default();
     e.push("mfa_enrolled", Value::Bool(false));
     e.leaves.push(EvidenceLeaf {
-      expr: "entity(\"idp\").status".to_owned(),
-      value: Value::from("active"),
+      expr:     "entity(\"idp\").status".to_owned(),
+      value:    Value::from("active"),
       fact_ids: vec![7],
     });
     e.attribute(&[42]);

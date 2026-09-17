@@ -44,8 +44,8 @@ const PROJECTIONS: [&str; 13] = [
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct RebuildReport {
   pub commands: usize,
-  pub facts: usize,
-  pub sweeps: usize,
+  pub facts:    usize,
+  pub sweeps:   usize,
 }
 
 /// What replay encountered, in stream-sequence order.

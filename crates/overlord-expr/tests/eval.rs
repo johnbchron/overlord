@@ -11,9 +11,7 @@ use overlord_expr::{
 
 const NOW: &str = "2026-01-15T00:00:00Z";
 
-fn now() -> Timestamp {
-  NOW.parse().unwrap()
-}
+fn now() -> Timestamp { NOW.parse().unwrap() }
 
 fn attrs(
   system: &str,
@@ -38,21 +36,13 @@ fn attrs(
 struct Ent(EntityAttrs);
 
 impl Subject for Ent {
-  fn kind(&self) -> SubjectKind {
-    SubjectKind::Entity
-  }
+  fn kind(&self) -> SubjectKind { SubjectKind::Entity }
 
-  fn own(&self) -> Option<&EntityAttrs> {
-    Some(&self.0)
-  }
+  fn own(&self) -> Option<&EntityAttrs> { Some(&self.0) }
 
-  fn select(&self, _: &SystemSelector) -> Vec<&EntityAttrs> {
-    Vec::new()
-  }
+  fn select(&self, _: &SystemSelector) -> Vec<&EntityAttrs> { Vec::new() }
 
-  fn primary(&self, _: &SystemSelector) -> Primary<'_> {
-    Primary::Missing
-  }
+  fn primary(&self, _: &SystemSelector) -> Primary<'_> { Primary::Missing }
 }
 
 /// A person-scoped subject: a bag of entities, with an optional
@@ -61,17 +51,13 @@ impl Subject for Ent {
 struct Person {
   entities: Vec<EntityAttrs>,
   /// Selectors the operator has designated a primary for.
-  primary: Vec<(String, usize)>,
+  primary:  Vec<(String, usize)>,
 }
 
 impl Subject for Person {
-  fn kind(&self) -> SubjectKind {
-    SubjectKind::Person
-  }
+  fn kind(&self) -> SubjectKind { SubjectKind::Person }
 
-  fn own(&self) -> Option<&EntityAttrs> {
-    None
-  }
+  fn own(&self) -> Option<&EntityAttrs> { None }
 
   fn select(&self, sel: &SystemSelector) -> Vec<&EntityAttrs> {
     self
@@ -110,13 +96,9 @@ fn tri(src: &str, subject: &dyn Subject, kind: SubjectKind) -> Tri {
     .unwrap_or_else(|e| panic!("{src}: {e}"))
 }
 
-fn ent_tri(src: &str, e: &Ent) -> Tri {
-  tri(src, e, SubjectKind::Entity)
-}
+fn ent_tri(src: &str, e: &Ent) -> Tri { tri(src, e, SubjectKind::Entity) }
 
-fn person_tri(src: &str, p: &Person) -> Tri {
-  tri(src, p, SubjectKind::Person)
-}
+fn person_tri(src: &str, p: &Person) -> Tri { tri(src, p, SubjectKind::Person) }
 
 fn user(fields: &[(&str, Value)]) -> Ent {
   let mut a = attrs("gws-prod", SystemKind::Workspace, "ada@example.com", 1);
@@ -423,7 +405,7 @@ fn a_designated_primary_resolves_the_ambiguity() {
 
   let p = Person {
     entities: vec![a, b],
-    primary: vec![("idp".to_owned(), 0)],
+    primary:  vec![("idp".to_owned(), 0)],
   };
   let e = run("not entity(\"idp\").mfa_enrolled", &p, SubjectKind::Person);
   assert_eq!(e.outcome.unwrap(), Tri::True);

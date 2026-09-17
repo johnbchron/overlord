@@ -32,9 +32,7 @@ pub enum StoreError {
 }
 
 impl StoreError {
-  pub fn rejected(msg: impl Into<String>) -> Self {
-    Self::Rejected(msg.into())
-  }
+  pub fn rejected(msg: impl Into<String>) -> Self { Self::Rejected(msg.into()) }
 
   pub fn not_found(what: impl Into<String>) -> Self {
     Self::NotFound(what.into())

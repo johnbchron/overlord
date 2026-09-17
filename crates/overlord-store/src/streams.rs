@@ -16,32 +16,30 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct SweepStart {
   /// The single definition of "now" for the entire run.
-  pub started_at: Timestamp,
-  pub requested: Vec<SystemId>,
-  pub pinned_checks: Vec<(CheckId, Revision)>,
-  pub pinned_norm: Vec<(String, String)>,
+  pub started_at:        Timestamp,
+  pub requested:         Vec<SystemId>,
+  pub pinned_checks:     Vec<(CheckId, Revision)>,
+  pub pinned_norm:       Vec<(String, String)>,
   pub absence_guard_pct: u32,
 }
 
 /// An observation about to be appended.
 #[derive(Debug, Clone)]
 pub struct NewFact {
-  pub system: SystemId,
-  pub entity_type: EntityType,
-  pub entity_key: EntityKey,
-  pub observed_at: Timestamp,
+  pub system:       SystemId,
+  pub entity_type:  EntityType,
+  pub entity_key:   EntityKey,
+  pub observed_at:  Timestamp,
   /// The vendor payload as received. `None` for a tombstone.
-  pub raw: Option<serde_json::Value>,
+  pub raw:          Option<serde_json::Value>,
   /// The normalization overlay. `None` for a tombstone.
-  pub normalized: Option<NormalizedRecord>,
+  pub normalized:   Option<NormalizedRecord>,
   pub norm_version: String,
 }
 
 impl NewFact {
   #[must_use]
-  pub fn is_tombstone(&self) -> bool {
-    self.normalized.is_none()
-  }
+  pub fn is_tombstone(&self) -> bool { self.normalized.is_none() }
 
   /// Record that an entity was absent from a complete snapshot.
   #[must_use]
@@ -61,14 +59,14 @@ impl NewFact {
 /// A fact as stored.
 #[derive(Debug, Clone)]
 pub struct FactRow {
-  pub id: i64,
-  pub seq: i64,
-  pub sweep_id: SweepId,
-  pub entity: EntityRef,
-  pub observed_at: Timestamp,
-  pub present: bool,
-  pub raw_hash: Option<String>,
-  pub norm_hash: Option<String>,
+  pub id:           i64,
+  pub seq:          i64,
+  pub sweep_id:     SweepId,
+  pub entity:       EntityRef,
+  pub observed_at:  Timestamp,
+  pub present:      bool,
+  pub raw_hash:     Option<String>,
+  pub norm_hash:    Option<String>,
   pub norm_version: String,
 }
 
@@ -76,19 +74,19 @@ pub struct FactRow {
 /// (SPEC.md section 10).
 #[derive(Debug, Clone)]
 pub struct SystemOutcome {
-  pub system: SystemId,
-  pub system_kind: SystemKind,
-  pub status: SystemStatus,
-  pub completeness: Completeness,
+  pub system:         SystemId,
+  pub system_kind:    SystemKind,
+  pub status:         SystemStatus,
+  pub completeness:   Completeness,
   pub observed_count: usize,
-  pub tombstoned: usize,
+  pub tombstoned:     usize,
   /// Entity count at the end of the previous sweep that covered this
   /// system; `None` when there was none.
   pub previous_count: Option<usize>,
   /// The absence guard refused to write tombstones for this system.
-  pub guard_tripped: bool,
-  pub duration_ms: u64,
-  pub error: Option<String>,
+  pub guard_tripped:  bool,
+  pub duration_ms:    u64,
+  pub error:          Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,13 +132,13 @@ impl SweepStatus {
 /// A sweep's run metadata (SPEC.md section 6.3).
 #[derive(Debug, Clone)]
 pub struct SweepSummary {
-  pub id: SweepId,
-  pub started_at: Timestamp,
-  pub finished_at: Option<Timestamp>,
-  pub status: SweepStatus,
-  pub requested: Vec<SystemId>,
+  pub id:            SweepId,
+  pub started_at:    Timestamp,
+  pub finished_at:   Option<Timestamp>,
+  pub status:        SweepStatus,
+  pub requested:     Vec<SystemId>,
   pub pinned_checks: Vec<(CheckId, Revision)>,
-  pub systems: Vec<SystemOutcome>,
+  pub systems:       Vec<SystemOutcome>,
 }
 
 impl Writer<'_> {

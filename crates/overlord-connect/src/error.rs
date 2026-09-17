@@ -39,7 +39,5 @@ impl ConnectorError {
   /// Whether this failure means the snapshot is partial rather than
   /// absent. A partial snapshot never produces tombstones.
   #[must_use]
-  pub fn is_partial(&self) -> bool {
-    matches!(self, Self::Incomplete(_))
-  }
+  pub fn is_partial(&self) -> bool { matches!(self, Self::Incomplete(_)) }
 }

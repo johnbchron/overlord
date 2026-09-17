@@ -19,8 +19,8 @@ use crate::{
 /// The outcome of appending a command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Applied {
-  pub id: i64,
-  pub seq: Seq,
+  pub id:        i64,
+  pub seq:       Seq,
   /// The idempotency key had already been used; nothing was appended and
   /// no projection moved. The id is the original command's.
   pub duplicate: bool,
@@ -164,10 +164,11 @@ impl Writer<'_> {
              WHERE surviving_uid = ?1",
           params![retired.as_str(), surviving.as_str()],
         )?;
-        self.conn().execute(
-          "DELETE FROM person WHERE person_uid = ?1",
-          [retired.as_str()],
-        )?;
+        self
+          .conn()
+          .execute("DELETE FROM person WHERE person_uid = ?1", [
+            retired.as_str()
+          ])?;
         Ok(())
       }
 

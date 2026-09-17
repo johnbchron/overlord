@@ -71,9 +71,7 @@ pub struct Path {
 
 impl Path {
   #[must_use]
-  pub fn is_raw(&self) -> bool {
-    self.head == "raw"
-  }
+  pub fn is_raw(&self) -> bool { self.head == "raw" }
 
   /// The source spelling, used in evidence.
   #[must_use]
@@ -99,28 +97,28 @@ pub enum Expr {
   And(Box<Expr>, Box<Expr>, Span),
   Or(Box<Expr>, Box<Expr>, Span),
   Cmp {
-    op: CmpOp,
-    lhs: Box<Expr>,
-    rhs: Box<Expr>,
+    op:   CmpOp,
+    lhs:  Box<Expr>,
+    rhs:  Box<Expr>,
     span: Span,
   },
   In {
-    lhs: Box<Expr>,
-    rhs: Box<Expr>,
+    lhs:  Box<Expr>,
+    rhs:  Box<Expr>,
     span: Span,
   },
   /// The pattern is required to be a literal, so it compiles once at
   /// validation time and a check can never be saved with a regex that
   /// does not compile.
   Matches {
-    lhs: Box<Expr>,
-    pattern: String,
+    lhs:      Box<Expr>,
+    pattern:  String,
     pat_span: Span,
-    span: Span,
+    span:     Span,
   },
   Coalesce {
-    lhs: Box<Expr>,
-    rhs: Box<Expr>,
+    lhs:  Box<Expr>,
+    rhs:  Box<Expr>,
     span: Span,
   },
   Count {
@@ -130,24 +128,24 @@ pub enum Expr {
   },
   Quant {
     /// `all` when true, `any` when false.
-    all: bool,
+    all:  bool,
     list: Box<Expr>,
     pred: Box<Expr>,
     span: Span,
   },
   Entities {
-    op: EntitiesOp,
+    op:       EntitiesOp,
     selector: String,
     sel_span: Span,
-    pred: Option<Box<Expr>>,
-    span: Span,
+    pred:     Option<Box<Expr>>,
+    span:     Span,
   },
   /// `entity("idp").mfa_enrolled` — the primary entity for a selector.
   EntityField {
     selector: String,
     sel_span: Span,
-    tail: Vec<String>,
-    span: Span,
+    tail:     Vec<String>,
+    span:     Span,
   },
   /// Derived from the sweep's `started_at`; there is no other clock.
   DaysAgo {

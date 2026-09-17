@@ -40,9 +40,7 @@ const TS_TAG: &str = "$ts";
 
 impl Value {
   #[must_use]
-  pub fn is_null(&self) -> bool {
-    matches!(self, Self::Null)
-  }
+  pub fn is_null(&self) -> bool { matches!(self, Self::Null) }
 
   /// The type name used in validation errors.
   #[must_use]
@@ -219,53 +217,37 @@ impl fmt::Display for Value {
 }
 
 impl From<bool> for Value {
-  fn from(b: bool) -> Self {
-    Self::Bool(b)
-  }
+  fn from(b: bool) -> Self { Self::Bool(b) }
 }
 
 impl From<f64> for Value {
-  fn from(n: f64) -> Self {
-    Self::Number(n)
-  }
+  fn from(n: f64) -> Self { Self::Number(n) }
 }
 
 impl From<i64> for Value {
   #[allow(clippy::cast_precision_loss)]
-  fn from(n: i64) -> Self {
-    Self::Number(n as f64)
-  }
+  fn from(n: i64) -> Self { Self::Number(n as f64) }
 }
 
 impl From<usize> for Value {
   #[allow(clippy::cast_precision_loss)]
-  fn from(n: usize) -> Self {
-    Self::Number(n as f64)
-  }
+  fn from(n: usize) -> Self { Self::Number(n as f64) }
 }
 
 impl From<String> for Value {
-  fn from(s: String) -> Self {
-    Self::String(s)
-  }
+  fn from(s: String) -> Self { Self::String(s) }
 }
 
 impl From<&str> for Value {
-  fn from(s: &str) -> Self {
-    Self::String(s.to_owned())
-  }
+  fn from(s: &str) -> Self { Self::String(s.to_owned()) }
 }
 
 impl From<Timestamp> for Value {
-  fn from(t: Timestamp) -> Self {
-    Self::Timestamp(t)
-  }
+  fn from(t: Timestamp) -> Self { Self::Timestamp(t) }
 }
 
 impl<T: Into<Value>> From<Option<T>> for Value {
-  fn from(o: Option<T>) -> Self {
-    o.map_or(Self::Null, Into::into)
-  }
+  fn from(o: Option<T>) -> Self { o.map_or(Self::Null, Into::into) }
 }
 
 impl From<&serde_json::Value> for Value {

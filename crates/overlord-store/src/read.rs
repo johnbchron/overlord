@@ -16,28 +16,28 @@ use crate::{
 /// One entity as evaluation needs it.
 #[derive(Debug, Clone)]
 pub struct EntityState {
-  pub entity: EntityRef,
+  pub entity:     EntityRef,
   pub normalized: NormalizedRecord,
-  pub raw: serde_json::Value,
+  pub raw:        serde_json::Value,
   /// The fact this state came from, which evidence cites.
-  pub fact_id: i64,
+  pub fact_id:    i64,
 }
 
 /// A violation as the board shows it.
 #[derive(Debug, Clone)]
 pub struct ViolationRow {
-  pub check_id: CheckId,
-  pub check_name: String,
-  pub subject: SubjectRef,
-  pub episode: i64,
-  pub state: ViolationState,
-  pub severity: Severity,
-  pub weight: i64,
-  pub opened_at: Timestamp,
-  pub opened_sweep: SweepId,
-  pub evidence: overlord_core::Evidence,
-  pub stale: bool,
-  pub ambiguous: bool,
+  pub check_id:      CheckId,
+  pub check_name:    String,
+  pub subject:       SubjectRef,
+  pub episode:       i64,
+  pub state:         ViolationState,
+  pub severity:      Severity,
+  pub weight:        i64,
+  pub opened_at:     Timestamp,
+  pub opened_sweep:  SweepId,
+  pub evidence:      overlord_core::Evidence,
+  pub stale:         bool,
+  pub ambiguous:     bool,
   /// The overlay was applied under an older revision of the check, so
   /// the acknowledgement predates the rule as it now reads.
   pub overlay_stale: bool,
@@ -49,17 +49,17 @@ pub struct ViolationRow {
   /// sweep restricted to one system would empty the "new" section for
   /// every other system, and SPEC.md section 10 is explicit that
   /// restricting a sweep must not manufacture change.
-  pub new_since: bool,
+  pub new_since:     bool,
 }
 
 /// A subject's risk score (SPEC.md section 8).
 #[derive(Debug, Clone)]
 pub struct ScoreRow {
-  pub person_uid: PersonUid,
-  pub display_name: Option<String>,
-  pub implicit: bool,
-  pub score: i64,
-  pub count: i64,
+  pub person_uid:     PersonUid,
+  pub display_name:   Option<String>,
+  pub implicit:       bool,
+  pub score:          i64,
+  pub count:          i64,
   pub worst_severity: Option<Severity>,
 }
 
@@ -496,9 +496,9 @@ impl Reader<'_> {
 /// Summary counts used by the CLI and the Systems screen.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Counts {
-  pub entities: usize,
-  pub persons: usize,
-  pub checks: usize,
+  pub entities:   usize,
+  pub persons:    usize,
+  pub checks:     usize,
   pub violations: usize,
 }
 
@@ -513,9 +513,9 @@ impl Reader<'_> {
       Ok(usize::try_from(n).unwrap_or(0))
     };
     Ok(Counts {
-      entities: one("SELECT count(*) FROM entity WHERE present = 1")?,
-      persons: one("SELECT count(*) FROM person")?,
-      checks: one("SELECT count(*) FROM check_head")?,
+      entities:   one("SELECT count(*) FROM entity WHERE present = 1")?,
+      persons:    one("SELECT count(*) FROM person")?,
+      checks:     one("SELECT count(*) FROM check_head")?,
       violations: one(
         "SELECT count(*) FROM violation
           WHERE state IN ('open', 'acknowledged')",
@@ -532,9 +532,7 @@ pub fn status_of(normalized: &NormalizedRecord) -> EntityStatus {
 
 /// Which scope a subject belongs to.
 #[must_use]
-pub fn subject_kind(subject: &SubjectRef) -> SubjectKind {
-  subject.kind()
-}
+pub fn subject_kind(subject: &SubjectRef) -> SubjectKind { subject.kind() }
 
 impl Reader<'_> {
   /// The systems a sweep actually covered, with whether each returned a

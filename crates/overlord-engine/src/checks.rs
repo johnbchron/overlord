@@ -71,12 +71,12 @@ pub fn upsert(
 /// What a dry-run found.
 #[derive(Debug, Clone)]
 pub struct DryRun {
-  pub check_id: CheckId,
-  pub revision: Revision,
+  pub check_id:    CheckId,
+  pub revision:    Revision,
   pub match_count: u64,
-  pub samples: Vec<DryrunSample>,
+  pub samples:     Vec<DryrunSample>,
   /// Subjects the condition could not be answered for.
-  pub errors: Vec<String>,
+  pub errors:      Vec<String>,
 }
 
 /// Evaluate a check revision against current facts and record the
@@ -159,7 +159,7 @@ pub fn dry_run(
           };
           evaluation.evidence.attribute(&fact_ids);
           out.samples.push(DryrunSample {
-            subject: subject.clone(),
+            subject:  subject.clone(),
             evidence: evaluation.evidence,
           });
         }

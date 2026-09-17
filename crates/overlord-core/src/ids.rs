@@ -184,9 +184,7 @@ pub struct Revision(pub u32);
 impl Revision {
   pub const FIRST: Self = Self(1);
 
-  pub fn next(self) -> Self {
-    Self(self.0 + 1)
-  }
+  pub fn next(self) -> Self { Self(self.0 + 1) }
 }
 
 impl fmt::Display for Revision {
@@ -207,14 +205,10 @@ impl fmt::Display for Revision {
 pub struct PersonUid(String);
 
 impl PersonUid {
-  pub fn new(s: impl Into<String>) -> Self {
-    Self(s.into())
-  }
+  pub fn new(s: impl Into<String>) -> Self { Self(s.into()) }
 
   /// Mint a uid for a person the operator created.
-  pub fn generate() -> Self {
-    Self(ulid::Ulid::new().to_string())
-  }
+  pub fn generate() -> Self { Self(ulid::Ulid::new().to_string()) }
 
   /// The derived uid of the implicit singleton person for `entity`.
   ///
@@ -224,9 +218,7 @@ impl PersonUid {
     Self(format!("implicit:{entity}"))
   }
 
-  pub fn is_implicit(&self) -> bool {
-    self.0.starts_with("implicit:")
-  }
+  pub fn is_implicit(&self) -> bool { self.0.starts_with("implicit:") }
 
   /// The entity behind an implicit uid, if this uid is implicit.
   pub fn implicit_entity(&self) -> Option<EntityRef> {
@@ -234,9 +226,7 @@ impl PersonUid {
     EntityRef::from_str(rest).ok()
   }
 
-  pub fn as_str(&self) -> &str {
-    &self.0
-  }
+  pub fn as_str(&self) -> &str { &self.0 }
 }
 
 impl fmt::Display for PersonUid {
@@ -250,9 +240,9 @@ impl fmt::Display for PersonUid {
   Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
 )]
 pub struct EntityRef {
-  pub system: SystemId,
+  pub system:      SystemId,
   pub entity_type: EntityType,
-  pub entity_key: EntityKey,
+  pub entity_key:  EntityKey,
 }
 
 impl EntityRef {
@@ -262,9 +252,9 @@ impl EntityRef {
     entity_key: impl Into<EntityKey>,
   ) -> Self {
     Self {
-      system: system.into(),
+      system:      system.into(),
       entity_type: entity_type.into(),
-      entity_key: entity_key.into(),
+      entity_key:  entity_key.into(),
     }
   }
 }
@@ -297,7 +287,7 @@ impl FromStr for EntityRef {
     else {
       return Err(ParseRefError::Arity {
         expected: 3,
-        found: s.split(SEP).count(),
+        found:    s.split(SEP).count(),
       });
     };
     if system.is_empty() || entity_type.is_empty() || entity_key.is_empty() {
@@ -402,7 +392,7 @@ impl FromStr for SubjectRef {
   fn from_str(s: &str) -> Result<Self, Self::Err> {
     let (kind, rest) = s.split_once(SEP).ok_or(ParseRefError::Arity {
       expected: 2,
-      found: 1,
+      found:    1,
     })?;
     match kind {
       "entity" => Ok(Self::Entity(EntityRef::from_str(rest)?)),

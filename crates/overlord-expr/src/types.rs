@@ -65,9 +65,7 @@ pub struct Schema {
 
 impl Schema {
   #[must_use]
-  pub fn new(applies_to: SubjectKind) -> Self {
-    Self { applies_to }
-  }
+  pub fn new(applies_to: SubjectKind) -> Self { Self { applies_to } }
 }
 
 /// A validated condition, ready to evaluate.
@@ -78,27 +76,21 @@ impl Schema {
 /// check is saved rather than once per subject per sweep.
 #[derive(Debug, Clone)]
 pub struct Program {
-  src: String,
-  ast: Expr,
+  src:        String,
+  ast:        Expr,
   applies_to: SubjectKind,
-  regexes: BTreeMap<String, Regex>,
+  regexes:    BTreeMap<String, Regex>,
 }
 
 impl Program {
   #[must_use]
-  pub fn src(&self) -> &str {
-    &self.src
-  }
+  pub fn src(&self) -> &str { &self.src }
 
   #[must_use]
-  pub fn ast(&self) -> &Expr {
-    &self.ast
-  }
+  pub fn ast(&self) -> &Expr { &self.ast }
 
   #[must_use]
-  pub fn applies_to(&self) -> SubjectKind {
-    self.applies_to
-  }
+  pub fn applies_to(&self) -> SubjectKind { self.applies_to }
 
   #[must_use]
   pub fn regex(&self, pattern: &str) -> Option<&Regex> {
@@ -184,10 +176,7 @@ pub fn compile(src: &str, schema: &Schema) -> Result<Program, Vec<Diagnostic>> {
       )
       .with_help(match ty {
         Ty::Number => "compare it, for example `count(groups) > 0`",
-        _ => {
-          "only `true` opens a violation, so the condition must be \
-              boolean"
-        }
+        _ => "only `true` opens a violation, so the condition must be boolean",
       }),
     );
   }
@@ -206,12 +195,12 @@ pub fn compile(src: &str, schema: &Schema) -> Result<Program, Vec<Diagnostic>> {
 }
 
 struct Cx<'a> {
-  schema: &'a Schema,
+  schema:       &'a Schema,
   /// Inside a `where`, paths name element fields, so the rule that a
   /// person-scoped check has no attributes of its own does not apply.
   in_predicate: bool,
-  errors: Vec<Diagnostic>,
-  regexes: BTreeMap<String, Regex>,
+  errors:       Vec<Diagnostic>,
+  regexes:      BTreeMap<String, Regex>,
 }
 
 impl Cx<'_> {
@@ -283,8 +272,8 @@ impl Cx<'_> {
               p.source()
             ),
             format!(
-              "read it from an entity: `entity(\"idp\").{}`, or test it \
-               with `has_entity(\"idp\" where {})`",
+              "read it from an entity: `entity(\"idp\").{}`, or test it with \
+               `has_entity(\"idp\" where {})`",
               p.source(),
               p.source()
             ),
@@ -516,8 +505,7 @@ impl Cx<'_> {
         self.error_help(
           e.span(),
           format!("cannot compare {}", ty.name()),
-          "compare a field of it, or use `count(...)` / `any(... where \
-           ...)`",
+          "compare a field of it, or use `count(...)` / `any(... where ...)`",
         );
         return;
       }
@@ -561,8 +549,8 @@ impl Cx<'_> {
       self.error_help(
         span,
         format!("cannot compare {} with {}", lt.name(), rt.name()),
-        "overlord never compares across types silently — it would turn a \
-         data problem into a clean `false`",
+        "overlord never compares across types silently — it would turn a data \
+         problem into a clean `false`",
       );
     }
   }
@@ -628,8 +616,7 @@ mod tests {
   #[test]
   fn a_bad_timestamp_literal_is_caught_when_the_check_is_saved() {
     let m = msgs(entity(
-      "last_login_at < days_ago(90) and \
-                         days_ago(30) > \"last tuesday\"",
+      "last_login_at < days_ago(90) and days_ago(30) > \"last tuesday\"",
     ));
     assert!(m.iter().any(|s| s.contains("is not a time")), "{m:?}");
   }

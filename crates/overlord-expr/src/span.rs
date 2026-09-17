@@ -12,14 +12,12 @@ use serde::{Deserialize, Serialize};
 )]
 pub struct Span {
   pub start: usize,
-  pub end: usize,
+  pub end:   usize,
 }
 
 impl Span {
   #[must_use]
-  pub const fn new(start: usize, end: usize) -> Self {
-    Self { start, end }
-  }
+  pub const fn new(start: usize, end: usize) -> Self { Self { start, end } }
 
   /// The span covering both, for errors reported against a whole
   /// subexpression.
@@ -51,11 +49,11 @@ impl Span {
 /// A parse or type error, positioned in the source.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Diagnostic {
-  pub span: Span,
+  pub span:    Span,
   pub message: String,
   /// A concrete suggestion. Shown beneath the underline in the editor.
   #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub help: Option<String>,
+  pub help:    Option<String>,
 }
 
 impl Diagnostic {

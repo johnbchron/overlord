@@ -81,7 +81,7 @@ impl fmt::Display for Tok {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
-  pub tok: Tok,
+  pub tok:  Tok,
   pub span: Span,
 }
 
@@ -128,7 +128,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
     if let Some(t) = simple {
       i += 2;
       out.push(Token {
-        tok: t,
+        tok:  t,
         span: Span::new(start, i),
       });
       continue;
@@ -146,7 +146,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
     if let Some(t) = single {
       i += 1;
       out.push(Token {
-        tok: t,
+        tok:  t,
         span: Span::new(start, i),
       });
       continue;
@@ -215,7 +215,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
           i += ch.len_utf8();
         }
         out.push(Token {
-          tok: Tok::Str(s),
+          tok:  Tok::Str(s),
           span: Span::new(start, i),
         });
       }
@@ -236,7 +236,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
           )
         })?;
         out.push(Token {
-          tok: Tok::Num(n),
+          tok:  Tok::Num(n),
           span: Span::new(start, i),
         });
       }
@@ -275,7 +275,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, Diagnostic> {
   }
 
   out.push(Token {
-    tok: Tok::Eof,
+    tok:  Tok::Eof,
     span: Span::new(src.len(), src.len()),
   });
   Ok(out)
@@ -291,78 +291,63 @@ mod tests {
 
   #[test]
   fn lexes_a_real_condition() {
-    assert_eq!(
-      toks("status == \"active\" and not mfa_enrolled"),
-      [
-        Tok::Ident("status".into()),
-        Tok::Eq,
-        Tok::Str("active".into()),
-        Tok::And,
-        Tok::Not,
-        Tok::Ident("mfa_enrolled".into()),
-        Tok::Eof,
-      ]
-    );
+    assert_eq!(toks("status == \"active\" and not mfa_enrolled"), [
+      Tok::Ident("status".into()),
+      Tok::Eq,
+      Tok::Str("active".into()),
+      Tok::And,
+      Tok::Not,
+      Tok::Ident("mfa_enrolled".into()),
+      Tok::Eof,
+    ]);
   }
 
   #[test]
   fn two_char_operators_win() {
-    assert_eq!(
-      toks("a <= b"),
-      [
-        Tok::Ident("a".into()),
-        Tok::Le,
-        Tok::Ident("b".into()),
-        Tok::Eof
-      ]
-    );
-    assert_eq!(
-      toks("a ?? b"),
-      [
-        Tok::Ident("a".into()),
-        Tok::Coalesce,
-        Tok::Ident("b".into()),
-        Tok::Eof
-      ]
-    );
+    assert_eq!(toks("a <= b"), [
+      Tok::Ident("a".into()),
+      Tok::Le,
+      Tok::Ident("b".into()),
+      Tok::Eof
+    ]);
+    assert_eq!(toks("a ?? b"), [
+      Tok::Ident("a".into()),
+      Tok::Coalesce,
+      Tok::Ident("b".into()),
+      Tok::Eof
+    ]);
   }
 
   #[test]
   fn a_dot_after_a_call_is_field_access_not_a_decimal_point() {
-    assert_eq!(
-      toks("entity(\"idp\").mfa_enrolled"),
-      [
-        Tok::Ident("entity".into()),
-        Tok::LParen,
-        Tok::Str("idp".into()),
-        Tok::RParen,
-        Tok::Dot,
-        Tok::Ident("mfa_enrolled".into()),
-        Tok::Eof,
-      ]
-    );
+    assert_eq!(toks("entity(\"idp\").mfa_enrolled"), [
+      Tok::Ident("entity".into()),
+      Tok::LParen,
+      Tok::Str("idp".into()),
+      Tok::RParen,
+      Tok::Dot,
+      Tok::Ident("mfa_enrolled".into()),
+      Tok::Eof,
+    ]);
     assert_eq!(toks("1.5"), [Tok::Num(1.5), Tok::Eof]);
   }
 
   #[test]
   fn regex_escapes_survive_lexing() {
-    assert_eq!(
-      toks(r#"name matches "^svc-\d+$""#),
-      [
-        Tok::Ident("name".into()),
-        Tok::Matches,
-        Tok::Str(r"^svc-\d+$".into()),
-        Tok::Eof,
-      ]
-    );
+    assert_eq!(toks(r#"name matches "^svc-\d+$""#), [
+      Tok::Ident("name".into()),
+      Tok::Matches,
+      Tok::Str(r"^svc-\d+$".into()),
+      Tok::Eof,
+    ]);
   }
 
   #[test]
   fn comments_run_to_end_of_line() {
-    assert_eq!(
-      toks("# a rule\nis_admin"),
-      [Tok::Ident("is_admin".into()), Tok::Eof]
-    );
+    assert_eq!(toks("# a rule\nis_admin"), [
+      Tok::Ident("is_admin".into()),
+      Tok::Eof
+    ]);
   }
 
   #[test]
@@ -393,9 +378,9 @@ mod tests {
 
   #[test]
   fn multibyte_text_does_not_split() {
-    assert_eq!(
-      toks("\"Ada Lovelace \u{1f680}\""),
-      [Tok::Str("Ada Lovelace \u{1f680}".into()), Tok::Eof]
-    );
+    assert_eq!(toks("\"Ada Lovelace \u{1f680}\""), [
+      Tok::Str("Ada Lovelace \u{1f680}".into()),
+      Tok::Eof
+    ]);
   }
 }

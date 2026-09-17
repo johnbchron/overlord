@@ -63,7 +63,7 @@ enum Command {
     limit: usize,
     /// Include suppressed, false-positive and resolved violations.
     #[arg(long)]
-    all: bool,
+    all:   bool,
   },
 
   /// Rank subjects by risk.
@@ -77,14 +77,14 @@ enum Command {
 
   /// Record that a violation should not count as bad state.
   Suppress {
-    check: String,
+    check:   String,
     subject: String,
     /// accepted_risk, bad_source_data or expected.
     #[arg(long, default_value = "accepted_risk")]
-    reason: String,
+    reason:  String,
     /// ISO-8601. Without it the suppression does not expire.
     #[arg(long)]
-    until: Option<String>,
+    until:   Option<String>,
   },
 
   /// Drop every projection and replay the streams.
@@ -179,15 +179,10 @@ async fn main() -> Result<()> {
 
     Command::Acknowledge { check, subject } => {
       let subject: SubjectRef = subject.parse().context("subject")?;
-      append(
-        &db,
-        &actor,
-        now,
-        CommandKind::ViolationAcknowledge {
-          check_id: CheckId::new(check),
-          subject,
-        },
-      )?;
+      append(&db, &actor, now, CommandKind::ViolationAcknowledge {
+        check_id: CheckId::new(check),
+        subject,
+      })?;
       println!("acknowledged");
     }
 
@@ -198,22 +193,16 @@ async fn main() -> Result<()> {
       until,
     } => {
       let subject: SubjectRef = subject.parse().context("subject")?;
-      let reason: SuppressReason = reason.parse().context(
-        "reason must be accepted_risk, \
-                                bad_source_data or expected",
-      )?;
+      let reason: SuppressReason = reason
+        .parse()
+        .context("reason must be accepted_risk, bad_source_data or expected")?;
       let until = until.map(|u| u.parse()).transpose().context("until")?;
-      append(
-        &db,
-        &actor,
-        now,
-        CommandKind::ViolationSuppress {
-          check_id: CheckId::new(check),
-          subject,
-          reason,
-          until,
-        },
-      )?;
+      append(&db, &actor, now, CommandKind::ViolationSuppress {
+        check_id: CheckId::new(check),
+        subject,
+        reason,
+        until,
+      })?;
       println!("suppressed");
     }
 
@@ -239,9 +228,7 @@ async fn main() -> Result<()> {
   Ok(())
 }
 
-fn registry() -> Registry {
-  Registry::new().with(FixtureConnector::boxed())
-}
+fn registry() -> Registry { Registry::new().with(FixtureConnector::boxed()) }
 
 fn append(
   db: &Db,

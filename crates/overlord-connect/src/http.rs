@@ -115,7 +115,7 @@ impl fmt::Display for PathPattern {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Allow {
   pub method: ReadMethod,
-  pub path: PathPattern,
+  pub path:   PathPattern,
   /// Why this endpoint is needed, shown on the Systems screen.
   pub reason: &'static str,
 }
@@ -149,9 +149,9 @@ impl fmt::Display for Allow {
 /// An HTTP client that can only reach a connector's allowlisted
 /// endpoints.
 pub struct RestrictedHttp {
-  client: reqwest::Client,
-  base: Url,
-  allow: Vec<Allow>,
+  client:  reqwest::Client,
+  base:    Url,
+  allow:   Vec<Allow>,
   /// Set for tests and dry runs: refuse every request rather than
   /// reaching the network at all.
   offline: bool,
@@ -193,9 +193,7 @@ impl RestrictedHttp {
   }
 
   #[must_use]
-  pub fn allowlist(&self) -> &[Allow] {
-    &self.allow
-  }
+  pub fn allowlist(&self) -> &[Allow] { &self.allow }
 
   /// Whether a request would be permitted. The check every request goes
   /// through, exposed so a test can assert the boundary directly.
@@ -251,7 +249,7 @@ impl RestrictedHttp {
     if !status.is_success() {
       return Err(ConnectorError::Status {
         status: status.as_u16(),
-        path: path.to_owned(),
+        path:   path.to_owned(),
       });
     }
     resp
@@ -276,14 +274,11 @@ mod tests {
   use super::*;
 
   fn http() -> RestrictedHttp {
-    RestrictedHttp::offline(
-      "https://example.test/admin/",
-      vec![
-        Allow::get("/directory/v1/users", "enumerate accounts"),
-        Allow::get("/directory/v1/users/*/aliases", "account aliases"),
-        Allow::get("/reports/v1/**", "login activity"),
-      ],
-    )
+    RestrictedHttp::offline("https://example.test/admin/", vec![
+      Allow::get("/directory/v1/users", "enumerate accounts"),
+      Allow::get("/directory/v1/users/*/aliases", "account aliases"),
+      Allow::get("/reports/v1/**", "login activity"),
+    ])
     .unwrap()
   }
 

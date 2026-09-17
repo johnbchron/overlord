@@ -21,14 +21,10 @@ pub enum Tri {
 
 impl Tri {
   #[must_use]
-  pub fn from_bool(b: bool) -> Self {
-    if b { Self::True } else { Self::False }
-  }
+  pub fn from_bool(b: bool) -> Self { if b { Self::True } else { Self::False } }
 
   #[must_use]
-  pub fn is_true(self) -> bool {
-    matches!(self, Self::True)
-  }
+  pub fn is_true(self) -> bool { matches!(self, Self::True) }
 
   /// Kleene negation: `not null` is `null`.
   #[must_use]
@@ -48,7 +44,7 @@ impl Tri {
 /// behind a passing check. Evaluation stops at the first one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvalError {
-  pub span: Span,
+  pub span:    Span,
   pub message: String,
 }
 
@@ -72,9 +68,9 @@ impl std::fmt::Display for EvalError {
 pub struct EntityAttrs {
   pub normalized: NormalizedRecord,
   /// The vendor payload, reachable at `raw.<path>`.
-  pub raw: serde_json::Value,
+  pub raw:        serde_json::Value,
   /// The fact this state came from, recorded in evidence.
-  pub fact_id: i64,
+  pub fact_id:    i64,
 }
 
 impl EntityAttrs {
@@ -149,19 +145,17 @@ pub struct EvalCtx {
 
 impl EvalCtx {
   #[must_use]
-  pub fn at(now: Timestamp) -> Self {
-    Self { now }
-  }
+  pub fn at(now: Timestamp) -> Self { Self { now } }
 }
 
 /// The outcome of evaluating one check against one subject.
 #[derive(Debug, Clone)]
 pub struct Evaluation {
-  pub outcome: Result<Tri, EvalError>,
+  pub outcome:   Result<Tri, EvalError>,
   /// The evaluated leaves, in evaluation order. Recorded whatever the
   /// outcome; the caller keeps them when a violation opens and when a
   /// dry-run wants samples.
-  pub evidence: Evidence,
+  pub evidence:  Evidence,
   /// Selectors that matched several entities with no designated primary.
   pub ambiguous: Vec<String>,
 }
@@ -198,21 +192,21 @@ pub fn eval(
 }
 
 struct Ev<'a> {
-  program: &'a Program,
-  subject: &'a dyn Subject,
-  ctx: &'a EvalCtx,
-  evidence: Evidence,
+  program:   &'a Program,
+  subject:   &'a dyn Subject,
+  ctx:       &'a EvalCtx,
+  evidence:  Evidence,
   ambiguous: Vec<String>,
   /// The `where` element stack. Non-empty means paths name element
   /// fields, and that leaves are not worth recording as evidence — an
   /// operator wants `count(groups where external) = 3`, not one line per
   /// group.
-  element: Vec<Value>,
+  element:   Vec<Value>,
   /// Depth of "this subexpression is plumbing, not evidence". Raised
   /// while evaluating the list operand of `count` / `any` / `all`: the
   /// aggregate is what an operator wants to see, and dumping the whole
   /// list beside it buries the number that mattered.
-  quiet: usize,
+  quiet:     usize,
 }
 
 type R<T> = Result<T, EvalError>;
@@ -640,8 +634,8 @@ fn compare(op: CmpOp, a: &Value, b: &Value, span: Span) -> R<Tri> {
       return Err(EvalError::new(
         span,
         format!(
-          "cannot compare {} with {} — overlord never compares across \
-           types silently",
+          "cannot compare {} with {} — overlord never compares across types \
+           silently",
           a.type_name(),
           b.type_name()
         ),

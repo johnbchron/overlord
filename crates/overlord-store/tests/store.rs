@@ -11,21 +11,17 @@ use overlord_store::{Db, NewFact, SweepStart, SweepStatus, error::StoreError};
 const T0: &str = "2026-01-15T00:00:00Z";
 const T1: &str = "2026-01-16T00:00:00Z";
 
-fn ts(s: &str) -> Timestamp {
-  s.parse().unwrap()
-}
+fn ts(s: &str) -> Timestamp { s.parse().unwrap() }
 
-fn db() -> Db {
-  Db::open_memory().unwrap()
-}
+fn db() -> Db { Db::open_memory().unwrap() }
 
 fn sweep(db: &Db, at: &str) -> SweepId {
   db.write(|w| {
     w.open_sweep(&SweepStart {
-      started_at: ts(at),
-      requested: vec![SystemId::new("gws-prod")],
-      pinned_checks: vec![],
-      pinned_norm: vec![],
+      started_at:        ts(at),
+      requested:         vec![SystemId::new("gws-prod")],
+      pinned_checks:     vec![],
+      pinned_norm:       vec![],
       absence_guard_pct: 10,
     })
   })
@@ -42,12 +38,12 @@ fn user_fact(key: &str, status: EntityStatus, mfa: bool) -> NewFact {
   );
   n.insert("mfa_enrolled", Value::Bool(mfa));
   NewFact {
-    system: SystemId::new("gws-prod"),
-    entity_type: EntityType::new("user"),
-    entity_key: EntityKey::new(key),
-    observed_at: ts(T0),
-    raw: Some(serde_json::json!({"primaryEmail": key})),
-    normalized: Some(n),
+    system:       SystemId::new("gws-prod"),
+    entity_type:  EntityType::new("user"),
+    entity_key:   EntityKey::new(key),
+    observed_at:  ts(T0),
+    raw:          Some(serde_json::json!({"primaryEmail": key})),
+    normalized:   Some(n),
     norm_version: "gworkspace/1".to_owned(),
   }
 }
@@ -87,7 +83,7 @@ fn facts_and_commands_share_one_monotonic_sequence() {
   db.write(|w| {
     w.append_command(&cmd(
       CommandKind::PersonCreate {
-        person_uid: PersonUid::new("P1"),
+        person_uid:   PersonUid::new("P1"),
         display_name: None,
       },
       T0,
@@ -220,7 +216,7 @@ fn a_retried_command_is_a_no_op_returning_the_original_id() {
   let db = db();
   let c = cmd(
     CommandKind::PersonCreate {
-      person_uid: PersonUid::new("P1"),
+      person_uid:   PersonUid::new("P1"),
       display_name: Some("Ada".to_owned()),
     },
     T0,
@@ -306,10 +302,10 @@ fn enabling_without_a_dry_run_is_refused() {
   db.write(|w| {
     w.append_command(&cmd(
       CommandKind::CheckDryrun {
-        check_id: CheckId::new("c"),
-        revision: Revision(1),
+        check_id:    CheckId::new("c"),
+        revision:    Revision(1),
         match_count: 2,
-        samples: vec![],
+        samples:     vec![],
       },
       T0,
     ))
@@ -346,10 +342,10 @@ fn a_dry_run_does_not_carry_across_a_revision() {
   db.write(|w| {
     w.append_command(&cmd(
       CommandKind::CheckDryrun {
-        check_id: CheckId::new("c"),
-        revision: Revision(1),
+        check_id:    CheckId::new("c"),
+        revision:    Revision(1),
         match_count: 0,
-        samples: vec![],
+        samples:     vec![],
       },
       T0,
     ))
@@ -382,8 +378,8 @@ fn a_merge_keeps_the_retired_uid_resolvable_forever() {
   db.write(|w| {
     w.append_command(&cmd(
       CommandKind::PersonLink {
-        person_uid: b.clone(),
-        entity: entity.clone(),
+        person_uid:      b.clone(),
+        entity:          entity.clone(),
         from_suggestion: None,
       },
       T0,
@@ -394,7 +390,7 @@ fn a_merge_keeps_the_retired_uid_resolvable_forever() {
     w.append_command(&cmd(
       CommandKind::PersonMerge {
         surviving: a.clone(),
-        retired: b.clone(),
+        retired:   b.clone(),
       },
       T1,
     ))
@@ -413,13 +409,10 @@ fn rebuilding_reproduces_the_projections() {
   let db = db();
   let s1 = sweep(&db, T0);
   db.write(|w| {
-    w.append_facts(
-      s1,
-      &[
-        user_fact("a@x.com", EntityStatus::Active, false),
-        user_fact("b@x.com", EntityStatus::Active, true),
-      ],
-    )
+    w.append_facts(s1, &[
+      user_fact("a@x.com", EntityStatus::Active, false),
+      user_fact("b@x.com", EntityStatus::Active, true),
+    ])
   })
   .unwrap();
   db.write(|w| w.commit_sweep(s1, SweepStatus::Ok, ts(T0)))
@@ -437,8 +430,8 @@ fn rebuilding_reproduces_the_projections() {
   db.write(|w| {
     w.append_command(&cmd(
       CommandKind::PersonLink {
-        person_uid: PersonUid::new("P1"),
-        entity: EntityRef::new("gws-prod", "user", "a@x.com"),
+        person_uid:      PersonUid::new("P1"),
+        entity:          EntityRef::new("gws-prod", "user", "a@x.com"),
         from_suggestion: None,
       },
       T1,

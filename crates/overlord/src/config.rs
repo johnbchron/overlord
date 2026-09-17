@@ -14,9 +14,9 @@ use serde::{Deserialize, Serialize};
 #[serde(deny_unknown_fields)]
 pub struct Config {
   #[serde(default)]
-  pub store: Store,
+  pub store:   Store,
   #[serde(default)]
-  pub sweep: Sweep,
+  pub sweep:   Sweep,
   #[serde(default)]
   pub systems: Vec<SystemConfig>,
 }

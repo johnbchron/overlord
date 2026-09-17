@@ -17,10 +17,10 @@ use crate::error::Result;
 /// Every entity and person in scope for one evaluation pass.
 #[derive(Debug, Default)]
 pub struct World {
-  entities: Vec<EntityAttrs>,
-  by_ref: BTreeMap<EntityRef, usize>,
+  entities:  Vec<EntityAttrs>,
+  by_ref:    BTreeMap<EntityRef, usize>,
   /// Members of each person, confirmed or implicit.
-  members: BTreeMap<PersonUid, Vec<usize>>,
+  members:   BTreeMap<PersonUid, Vec<usize>>,
   /// Operator-designated primaries, keyed by person and system kind.
   primaries: BTreeMap<(PersonUid, SystemKind), usize>,
 }
@@ -44,8 +44,8 @@ impl World {
       w.by_ref.insert(state.entity.clone(), idx);
       w.entities.push(EntityAttrs {
         normalized: state.normalized,
-        raw: state.raw,
-        fact_id: state.fact_id,
+        raw:        state.raw,
+        fact_id:    state.fact_id,
       });
     }
 
@@ -129,8 +129,8 @@ impl World {
     let idx = self.members.get(uid)?;
     Some(PersonSubject {
       world: self,
-      uid: uid.clone(),
-      idx: idx.clone(),
+      uid:   uid.clone(),
+      idx:   idx.clone(),
     })
   }
 
@@ -151,30 +151,22 @@ pub struct EntitySubject<'a> {
 }
 
 impl Subject for EntitySubject<'_> {
-  fn kind(&self) -> SubjectKind {
-    SubjectKind::Entity
-  }
+  fn kind(&self) -> SubjectKind { SubjectKind::Entity }
 
-  fn own(&self) -> Option<&EntityAttrs> {
-    Some(self.attrs)
-  }
+  fn own(&self) -> Option<&EntityAttrs> { Some(self.attrs) }
 
   /// An entity-scoped check has no selectors — the type checker rejects
   /// them — so these are unreachable rather than empty by accident.
-  fn select(&self, _: &SystemSelector) -> Vec<&EntityAttrs> {
-    Vec::new()
-  }
+  fn select(&self, _: &SystemSelector) -> Vec<&EntityAttrs> { Vec::new() }
 
-  fn primary(&self, _: &SystemSelector) -> Primary<'_> {
-    Primary::Missing
-  }
+  fn primary(&self, _: &SystemSelector) -> Primary<'_> { Primary::Missing }
 }
 
 /// A person: a set of entities, with optional designated primaries.
 pub struct PersonSubject<'a> {
   world: &'a World,
-  uid: PersonUid,
-  idx: Vec<usize>,
+  uid:   PersonUid,
+  idx:   Vec<usize>,
 }
 
 impl PersonSubject<'_> {
@@ -192,13 +184,9 @@ impl PersonSubject<'_> {
 }
 
 impl Subject for PersonSubject<'_> {
-  fn kind(&self) -> SubjectKind {
-    SubjectKind::Person
-  }
+  fn kind(&self) -> SubjectKind { SubjectKind::Person }
 
-  fn own(&self) -> Option<&EntityAttrs> {
-    None
-  }
+  fn own(&self) -> Option<&EntityAttrs> { None }
 
   fn select(&self, sel: &SystemSelector) -> Vec<&EntityAttrs> {
     self

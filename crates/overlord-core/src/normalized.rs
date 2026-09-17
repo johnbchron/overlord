@@ -87,14 +87,14 @@ pub const RESERVED_FIELDS: [&str; 6] = [
 /// payload, because the two are stored as separate deduplicated blobs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NormalizedRecord {
-  pub system: SystemId,
-  pub system_kind: SystemKind,
-  pub entity_type: EntityType,
-  pub entity_key: EntityKey,
+  pub system:       SystemId,
+  pub system_kind:  SystemKind,
+  pub entity_type:  EntityType,
+  pub entity_key:   EntityKey,
   pub display_name: Option<String>,
-  pub status: EntityStatus,
+  pub status:       EntityStatus,
   /// Everything else the connector could map, flat at the root.
-  extra: BTreeMap<String, Value>,
+  extra:            BTreeMap<String, Value>,
 }
 
 impl NormalizedRecord {
@@ -152,9 +152,9 @@ impl NormalizedRecord {
   #[must_use]
   pub fn entity_ref(&self) -> EntityRef {
     EntityRef {
-      system: self.system.clone(),
+      system:      self.system.clone(),
       entity_type: self.entity_type.clone(),
-      entity_key: self.entity_key.clone(),
+      entity_key:  self.entity_key.clone(),
     }
   }
 
@@ -184,9 +184,7 @@ impl NormalizedRecord {
   }
 
   #[must_use]
-  pub fn extra(&self) -> &BTreeMap<String, Value> {
-    &self.extra
-  }
+  pub fn extra(&self) -> &BTreeMap<String, Value> { &self.extra }
 
   /// The flat JSON form that is stored as the fact's overlay.
   fn to_map(&self) -> BTreeMap<String, Value> {

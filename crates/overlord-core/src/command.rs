@@ -21,13 +21,13 @@ use crate::{
 pub enum CommandKind {
   #[serde(rename = "person.create")]
   PersonCreate {
-    person_uid: PersonUid,
+    person_uid:   PersonUid,
     display_name: Option<String>,
   },
   #[serde(rename = "person.link")]
   PersonLink {
-    person_uid: PersonUid,
-    entity: EntityRef,
+    person_uid:      PersonUid,
+    entity:          EntityRef,
     /// The suggestion evidence the operator confirmed, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     from_suggestion: Option<String>,
@@ -35,7 +35,7 @@ pub enum CommandKind {
   #[serde(rename = "person.unlink")]
   PersonUnlink {
     person_uid: PersonUid,
-    entity: EntityRef,
+    entity:     EntityRef,
   },
   #[serde(rename = "person.merge")]
   PersonMerge {
@@ -43,45 +43,45 @@ pub enum CommandKind {
     surviving: PersonUid,
     /// Becomes a permanent alias, so prior violations, acknowledgements
     /// and suppressions resolve through it rather than being rewritten.
-    retired: PersonUid,
+    retired:   PersonUid,
   },
   #[serde(rename = "person.split")]
   PersonSplit {
     /// Keeps the history.
-    from: PersonUid,
-    new_uid: PersonUid,
+    from:     PersonUid,
+    new_uid:  PersonUid,
     entities: Vec<EntityRef>,
   },
   #[serde(rename = "person.set_primary")]
   PersonSetPrimary {
-    person_uid: PersonUid,
+    person_uid:  PersonUid,
     system_kind: SystemKind,
-    entity: EntityRef,
+    entity:      EntityRef,
   },
 
   #[serde(rename = "violation.acknowledge")]
   ViolationAcknowledge {
     check_id: CheckId,
-    subject: SubjectRef,
+    subject:  SubjectRef,
   },
   #[serde(rename = "violation.suppress")]
   ViolationSuppress {
     check_id: CheckId,
-    subject: SubjectRef,
-    reason: SuppressReason,
+    subject:  SubjectRef,
+    reason:   SuppressReason,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    until: Option<Timestamp>,
+    until:    Option<Timestamp>,
   },
   #[serde(rename = "violation.false_positive")]
   ViolationFalsePositive {
     check_id: CheckId,
-    subject: SubjectRef,
+    subject:  SubjectRef,
   },
   /// Undo an overlay; the violation is recomputed from its condition.
   #[serde(rename = "violation.revoke")]
   ViolationRevoke {
     check_id: CheckId,
-    subject: SubjectRef,
+    subject:  SubjectRef,
   },
 
   /// Creates the check, or appends a new revision.
@@ -91,11 +91,11 @@ pub enum CommandKind {
   /// `check.enable` is rejected without one.
   #[serde(rename = "check.dryrun")]
   CheckDryrun {
-    check_id: CheckId,
-    revision: Revision,
+    check_id:    CheckId,
+    revision:    Revision,
     match_count: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    samples: Vec<DryrunSample>,
+    samples:     Vec<DryrunSample>,
   },
   #[serde(rename = "check.enable")]
   CheckEnable {
@@ -107,10 +107,10 @@ pub enum CommandKind {
 
   #[serde(rename = "normalization.upsert")]
   NormalizationUpsert {
-    ruleset_id: String,
+    ruleset_id:  String,
     system_kind: SystemKind,
-    version: String,
-    body: serde_json::Value,
+    version:     String,
+    body:        serde_json::Value,
   },
 }
 
@@ -207,15 +207,15 @@ impl CommandKind {
 /// A command about to be appended.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewCommand {
-  pub at: Timestamp,
-  pub actor: Actor,
-  pub kind: CommandKind,
-  pub note: Option<String>,
+  pub at:              Timestamp,
+  pub actor:           Actor,
+  pub kind:            CommandKind,
+  pub note:            Option<String>,
   /// Client-supplied; a duplicate submission is a no-op returning the
   /// original command id (SPEC.md section 6.2).
   pub idempotency_key: Option<String>,
   /// Groups multi-step actions, such as a merge.
-  pub batch_id: Option<String>,
+  pub batch_id:        Option<String>,
 }
 
 impl NewCommand {
@@ -257,14 +257,14 @@ impl NewCommand {
 /// A command as stored: a [`NewCommand`] plus its stream position.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommandRecord {
-  pub id: i64,
-  pub seq: Seq,
-  pub at: Timestamp,
-  pub actor: Actor,
-  pub kind: CommandKind,
-  pub note: Option<String>,
+  pub id:              i64,
+  pub seq:             Seq,
+  pub at:              Timestamp,
+  pub actor:           Actor,
+  pub kind:            CommandKind,
+  pub note:            Option<String>,
   pub idempotency_key: Option<String>,
-  pub batch_id: Option<String>,
+  pub batch_id:        Option<String>,
 }
 
 #[cfg(test)]
@@ -288,25 +288,25 @@ mod tests {
     let subject = SubjectRef::Entity(entity.clone());
     let kinds = vec![
       CommandKind::PersonCreate {
-        person_uid: uid.clone(),
+        person_uid:   uid.clone(),
         display_name: Some("Ada".to_owned()),
       },
       CommandKind::PersonLink {
-        person_uid: uid.clone(),
-        entity: entity.clone(),
+        person_uid:      uid.clone(),
+        entity:          entity.clone(),
         from_suggestion: Some("exact-email".to_owned()),
       },
       CommandKind::PersonUnlink {
         person_uid: uid.clone(),
-        entity: entity.clone(),
+        entity:     entity.clone(),
       },
       CommandKind::PersonMerge {
         surviving: uid.clone(),
-        retired: PersonUid::new("01J0WXYZ"),
+        retired:   PersonUid::new("01J0WXYZ"),
       },
       CommandKind::PersonSplit {
-        from: uid.clone(),
-        new_uid: PersonUid::new("01J0SPLT"),
+        from:     uid.clone(),
+        new_uid:  PersonUid::new("01J0SPLT"),
         entities: vec![entity.clone()],
       },
       CommandKind::PersonSetPrimary {
@@ -316,17 +316,17 @@ mod tests {
       },
       CommandKind::ViolationAcknowledge {
         check_id: CheckId::new("idp-mfa-missing"),
-        subject: subject.clone(),
+        subject:  subject.clone(),
       },
       CommandKind::ViolationSuppress {
         check_id: CheckId::new("idp-mfa-missing"),
-        subject: subject.clone(),
-        reason: SuppressReason::AcceptedRisk,
-        until: Some("2026-06-01T00:00:00Z".parse().unwrap()),
+        subject:  subject.clone(),
+        reason:   SuppressReason::AcceptedRisk,
+        until:    Some("2026-06-01T00:00:00Z".parse().unwrap()),
       },
       CommandKind::ViolationFalsePositive {
         check_id: CheckId::new("c"),
-        subject: subject.clone(),
+        subject:  subject.clone(),
       },
       CommandKind::ViolationRevoke {
         check_id: CheckId::new("c"),
@@ -350,10 +350,10 @@ mod tests {
         },
       },
       CommandKind::CheckDryrun {
-        check_id: CheckId::new("c"),
-        revision: Revision::FIRST,
+        check_id:    CheckId::new("c"),
+        revision:    Revision::FIRST,
         match_count: 3,
-        samples: vec![],
+        samples:     vec![],
       },
       CommandKind::CheckEnable {
         check_id: CheckId::new("c"),
@@ -363,10 +363,10 @@ mod tests {
         check_id: CheckId::new("c"),
       },
       CommandKind::NormalizationUpsert {
-        ruleset_id: "gworkspace-default".to_owned(),
+        ruleset_id:  "gworkspace-default".to_owned(),
         system_kind: SystemKind::Workspace,
-        version: "3".to_owned(),
-        body: serde_json::json!({"status": {"suspended": "suspended"}}),
+        version:     "3".to_owned(),
+        body:        serde_json::json!({"status": {"suspended": "suspended"}}),
       },
     ];
     for k in &kinds {
@@ -384,7 +384,7 @@ mod tests {
   #[test]
   fn person_create_carries_its_uid_so_replay_is_deterministic() {
     let k = CommandKind::PersonCreate {
-      person_uid: PersonUid::generate(),
+      person_uid:   PersonUid::generate(),
       display_name: None,
     };
     let (_, args) = k.to_parts().unwrap();

@@ -16,17 +16,11 @@ use overlord_store::{Db, SweepStatus, SystemStatus};
 /// A fixed instant, so `days_ago` windows are stable in tests.
 const NOW: &str = "2026-02-01T00:00:00Z";
 
-fn ts(s: &str) -> Timestamp {
-  s.parse().unwrap()
-}
+fn ts(s: &str) -> Timestamp { s.parse().unwrap() }
 
-fn actor() -> Actor {
-  Actor::new("cli:test")
-}
+fn actor() -> Actor { Actor::new("cli:test") }
 
-fn registry() -> Registry {
-  Registry::new().with(FixtureConnector::boxed())
-}
+fn registry() -> Registry { Registry::new().with(FixtureConnector::boxed()) }
 
 fn fixture(name: &str) -> String {
   format!("{}/../../fixtures/{name}", env!("CARGO_MANIFEST_DIR"))
@@ -34,9 +28,9 @@ fn fixture(name: &str) -> String {
 
 fn system(id: &str, scenario: &str, stage: usize) -> SystemConfig {
   SystemConfig {
-    id: SystemId::new(id),
+    id:        SystemId::new(id),
     connector: "fixture".to_owned(),
-    config: serde_json::json!({
+    config:    serde_json::json!({
       "path": fixture(scenario),
       "stage": stage
     }),
@@ -187,21 +181,18 @@ async fn a_sweep_opens_the_violations_the_facts_justify() {
   assert_eq!(out.systems[0].tombstoned, 0);
   assert_eq!(out.evaluation.opened, 4);
 
-  assert_eq!(
-    active(&db),
-    [
-      ("dormant-admin".to_owned(), "grace@example.com".to_owned()),
-      (
-        "dormant-admin".to_owned(),
-        "svc-deploy@example.com".to_owned()
-      ),
-      ("mfa-missing".to_owned(), "grace@example.com".to_owned()),
-      (
-        "mfa-missing".to_owned(),
-        "svc-deploy@example.com".to_owned()
-      ),
-    ]
-  );
+  assert_eq!(active(&db), [
+    ("dormant-admin".to_owned(), "grace@example.com".to_owned()),
+    (
+      "dormant-admin".to_owned(),
+      "svc-deploy@example.com".to_owned()
+    ),
+    ("mfa-missing".to_owned(), "grace@example.com".to_owned()),
+    (
+      "mfa-missing".to_owned(),
+      "svc-deploy@example.com".to_owned()
+    ),
+  ]);
 }
 
 #[tokio::test]
@@ -225,19 +216,16 @@ async fn a_fixed_condition_resolves_and_a_departure_resolves_too() {
   assert_eq!(out.systems[0].tombstoned, 1, "alan is gone");
   assert_eq!(out.evaluation.resolved, 2, "grace's two violations clear");
 
-  assert_eq!(
-    active(&db),
-    [
-      (
-        "dormant-admin".to_owned(),
-        "svc-deploy@example.com".to_owned()
-      ),
-      (
-        "mfa-missing".to_owned(),
-        "svc-deploy@example.com".to_owned()
-      ),
-    ]
-  );
+  assert_eq!(active(&db), [
+    (
+      "dormant-admin".to_owned(),
+      "svc-deploy@example.com".to_owned()
+    ),
+    (
+      "mfa-missing".to_owned(),
+      "svc-deploy@example.com".to_owned()
+    ),
+  ]);
   assert_eq!(
     state_of(&db, "mfa-missing", &ws("grace@example.com")),
     Some(ViolationState::Resolved)
@@ -418,8 +406,12 @@ async fn confirming_a_link_never_changes_the_total_score() {
       w.append_command(&NewCommand::new(
         actor(),
         CommandKind::PersonLink {
-          person_uid: uid.clone(),
-          entity: EntityRef::new(system_id, "user", "grace@example.com"),
+          person_uid:      uid.clone(),
+          entity:          EntityRef::new(
+            system_id,
+            "user",
+            "grace@example.com",
+          ),
           from_suggestion: None,
         },
         ts(NOW),
@@ -464,7 +456,7 @@ async fn an_acknowledgement_persists_across_sweeps() {
       actor(),
       CommandKind::ViolationAcknowledge {
         check_id: CheckId::new("mfa-missing"),
-        subject: subject.clone(),
+        subject:  subject.clone(),
       },
       ts(NOW),
     ))
@@ -495,7 +487,7 @@ async fn a_regression_starts_clean_rather_than_pre_silenced() {
       actor(),
       CommandKind::ViolationAcknowledge {
         check_id: CheckId::new("mfa-missing"),
-        subject: subject.clone(),
+        subject:  subject.clone(),
       },
       ts(NOW),
     ))
@@ -546,9 +538,9 @@ async fn a_suppression_expires_against_the_sweeps_own_clock() {
       actor(),
       CommandKind::ViolationSuppress {
         check_id: CheckId::new("mfa-missing"),
-        subject: subject.clone(),
-        reason: SuppressReason::AcceptedRisk,
-        until: Some(ts("2026-03-01T00:00:00Z")),
+        subject:  subject.clone(),
+        reason:   SuppressReason::AcceptedRisk,
+        until:    Some(ts("2026-03-01T00:00:00Z")),
       },
       ts(NOW),
     ))
@@ -637,7 +629,7 @@ async fn replaying_the_streams_reproduces_the_live_projections() {
       actor(),
       CommandKind::ViolationAcknowledge {
         check_id: CheckId::new("mfa-missing"),
-        subject: subject.clone(),
+        subject:  subject.clone(),
       },
       ts("2026-02-01T06:00:00Z"),
     ))
@@ -648,8 +640,8 @@ async fn replaying_the_streams_reproduces_the_live_projections() {
     w.append_command(&NewCommand::new(
       actor(),
       CommandKind::PersonLink {
-        person_uid: PersonUid::new("P-ada"),
-        entity: EntityRef::new("ws", "user", "ada@example.com"),
+        person_uid:      PersonUid::new("P-ada"),
+        entity:          EntityRef::new("ws", "user", "ada@example.com"),
         from_suggestion: None,
       },
       ts("2026-02-01T07:00:00Z"),
@@ -805,17 +797,14 @@ async fn restricting_a_sweep_does_not_manufacture_change_elsewhere() {
   .await;
 
   let after_full = new_since(&db);
-  assert_eq!(
-    after_full,
-    [
-      ("mfa-missing".to_owned(), "idp/grace@example.com".to_owned()),
-      ("mfa-missing".to_owned(), "ws/grace@example.com".to_owned()),
-      (
-        "mfa-missing".to_owned(),
-        "ws/svc-deploy@example.com".to_owned()
-      ),
-    ]
-  );
+  assert_eq!(after_full, [
+    ("mfa-missing".to_owned(), "idp/grace@example.com".to_owned()),
+    ("mfa-missing".to_owned(), "ws/grace@example.com".to_owned()),
+    (
+      "mfa-missing".to_owned(),
+      "ws/svc-deploy@example.com".to_owned()
+    ),
+  ]);
 
   // Now sweep only `ws`, with the same facts. Nothing about `idp`
   // changed, and nothing looked at it — so its section must not move.
@@ -831,8 +820,8 @@ async fn restricting_a_sweep_does_not_manufacture_change_elsewhere() {
   assert_eq!(
     new_since(&db),
     [("mfa-missing".to_owned(), "idp/grace@example.com".to_owned())],
-    "idp's newest finding is still its newest; ws's are no longer new \
-     because a later sweep re-confirmed them"
+    "idp's newest finding is still its newest; ws's are no longer new because \
+     a later sweep re-confirmed them"
   );
 
   // The bug this replaces: comparing against the latest sweep overall
@@ -857,13 +846,10 @@ async fn a_violation_opening_in_the_latest_sweep_of_its_system_is_new() {
 
   // Stage 1 of the baseline has grace enrolled, so only the robot fails.
   sweep(&db, &plan(vec![system("ws", "baseline.json", 1)], NOW)).await;
-  assert_eq!(
-    new_since(&db),
-    [(
-      "mfa-missing".to_owned(),
-      "ws/svc-deploy@example.com".to_owned()
-    )]
-  );
+  assert_eq!(new_since(&db), [(
+    "mfa-missing".to_owned(),
+    "ws/svc-deploy@example.com".to_owned()
+  )]);
 
   // Stage 0 has grace unenrolled again: a genuinely new violation, on a
   // system this sweep did cover.

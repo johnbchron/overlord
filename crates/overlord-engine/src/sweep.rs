@@ -25,29 +25,29 @@ use crate::{
 /// One configured system.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct SystemConfig {
-  pub id: SystemId,
+  pub id:        SystemId,
   /// Which connector implementation to use.
   pub connector: String,
   /// Connector-specific settings. Credentials never live here; they
   /// come from the environment (SPEC.md section 14).
   #[serde(default)]
-  pub config: serde_json::Value,
+  pub config:    serde_json::Value,
 }
 
 /// What to sweep and how.
 #[derive(Debug, Clone)]
 pub struct SweepPlan {
-  pub systems: Vec<SystemConfig>,
+  pub systems:           Vec<SystemConfig>,
   /// The single definition of "now" for the run (SPEC.md section 10).
   ///
   /// Taken here, at the edge, rather than read inside the sweep: it is
   /// the one clock read the whole run is allowed, so making it an input
   /// is what lets a test pin it and a replay reproduce it.
-  pub started_at: Timestamp,
+  pub started_at:        Timestamp,
   /// A snapshot that would tombstone more than this share of a system's
   /// entities is refused (SPEC.md section 10).
   pub absence_guard_pct: u32,
-  pub actor: Actor,
+  pub actor:             Actor,
 }
 
 impl SweepPlan {
@@ -82,12 +82,12 @@ impl SweepPlan {
 /// The result of one run.
 #[derive(Debug, Clone)]
 pub struct SweepOutcome {
-  pub sweep: overlord_core::SweepId,
-  pub status: SweepStatus,
-  pub systems: Vec<SystemOutcome>,
+  pub sweep:      overlord_core::SweepId,
+  pub status:     SweepStatus,
+  pub systems:    Vec<SystemOutcome>,
   pub evaluation: EvalReport,
   /// Normalization problems worth showing on the coverage view.
-  pub warnings: Vec<String>,
+  pub warnings:   Vec<String>,
 }
 
 /// Run a sweep end to end.
@@ -218,18 +218,18 @@ async fn sweep_one(
   };
 
   let failed = |err: &dyn std::fmt::Display, at: Timestamp| SystemOutcome {
-    system: sys.id.clone(),
-    system_kind: ruleset.system_kind,
-    status: SystemStatus::Failed,
-    completeness: Completeness::Partial {
+    system:         sys.id.clone(),
+    system_kind:    ruleset.system_kind,
+    status:         SystemStatus::Failed,
+    completeness:   Completeness::Partial {
       reason: err.to_string(),
     },
     observed_count: 0,
-    tombstoned: 0,
+    tombstoned:     0,
     previous_count: Some(previous_count),
-    guard_tripped: false,
-    duration_ms: elapsed(at),
-    error: Some(err.to_string()),
+    guard_tripped:  false,
+    duration_ms:    elapsed(at),
+    error:          Some(err.to_string()),
   };
 
   let http = match connector.http(ctx) {
@@ -261,12 +261,12 @@ async fn sweep_one(
         let record = normalized.record;
         observed.insert(record.entity_ref());
         facts.push(NewFact {
-          system: sys.id.clone(),
-          entity_type: record.entity_type.clone(),
-          entity_key: record.entity_key.clone(),
-          observed_at: started_at,
-          raw: Some(obs.raw.clone()),
-          normalized: Some(record),
+          system:       sys.id.clone(),
+          entity_type:  record.entity_type.clone(),
+          entity_key:   record.entity_key.clone(),
+          observed_at:  started_at,
+          raw:          Some(obs.raw.clone()),
+          normalized:   Some(record),
           norm_version: ruleset.version.clone(),
         });
       }
@@ -293,8 +293,8 @@ async fn sweep_one(
         // is recorded, and the system is flagged for confirmation.
         guard_tripped = true;
         warnings.push(format!(
-          "{}: {} of {previous_count} entities were absent ({share}%, \
-           guard is {}%); no tombstones written, confirm the snapshot",
+          "{}: {} of {previous_count} entities were absent ({share}%, guard \
+           is {}%); no tombstones written, confirm the snapshot",
           sys.id,
           missing.len(),
           plan.absence_guard_pct

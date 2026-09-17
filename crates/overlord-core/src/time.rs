@@ -20,19 +20,13 @@ impl Timestamp {
   /// constructor outside this module.
   #[must_use]
   #[allow(clippy::disallowed_methods)]
-  pub fn now() -> Self {
-    Self(jiff::Timestamp::now())
-  }
+  pub fn now() -> Self { Self(jiff::Timestamp::now()) }
 
   #[must_use]
-  pub const fn from_jiff(ts: jiff::Timestamp) -> Self {
-    Self(ts)
-  }
+  pub const fn from_jiff(ts: jiff::Timestamp) -> Self { Self(ts) }
 
   #[must_use]
-  pub const fn as_jiff(self) -> jiff::Timestamp {
-    self.0
-  }
+  pub const fn as_jiff(self) -> jiff::Timestamp { self.0 }
 
   /// This instant minus `days`, for the expression language's
   /// `days_ago(n)` (SPEC.md section 7).
@@ -51,9 +45,7 @@ impl Timestamp {
 
   /// Whether `self` is at or after `other`.
   #[must_use]
-  pub fn reached(self, other: Self) -> bool {
-    self.0 >= other.0
-  }
+  pub fn reached(self, other: Self) -> bool { self.0 >= other.0 }
 }
 
 /// Fixed-width UTC ISO-8601, nanosecond precision.
@@ -110,9 +102,7 @@ impl<'de> Deserialize<'de> for Timestamp {
 mod tests {
   use super::*;
 
-  fn ts(s: &str) -> Timestamp {
-    s.parse().unwrap()
-  }
+  fn ts(s: &str) -> Timestamp { s.parse().unwrap() }
 
   #[test]
   fn round_trips_through_iso8601() {

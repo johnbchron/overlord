@@ -108,9 +108,9 @@ impl CheckDraft {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CheckRecord {
   #[serde(flatten)]
-  pub draft: CheckDraft,
+  pub draft:    CheckDraft,
   pub revision: Revision,
-  pub enabled: bool,
+  pub enabled:  bool,
 }
 
 impl CheckRecord {
@@ -123,7 +123,7 @@ impl CheckRecord {
 /// One sample recorded by a dry-run (SPEC.md section 7).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DryrunSample {
-  pub subject: crate::ids::SubjectRef,
+  pub subject:  crate::ids::SubjectRef,
   pub evidence: Evidence,
 }
 

@@ -15,25 +15,25 @@ use crate::{db::Writer, error::Result};
 /// The latest episode of one `(check, subject)` violation.
 #[derive(Debug, Clone)]
 pub struct Episode {
-  pub episode: i64,
-  pub state: ViolationState,
-  pub revision_open: u32,
+  pub episode:        i64,
+  pub state:          ViolationState,
+  pub revision_open:  u32,
   pub suppress_until: Option<Timestamp>,
 }
 
 /// Everything needed to open or refresh an episode.
 #[derive(Debug, Clone)]
 pub struct EpisodeFacts {
-  pub check_id: String,
-  pub subject: SubjectRef,
-  pub severity: Severity,
-  pub weight: i64,
-  pub revision: u32,
-  pub sweep: SweepId,
-  pub at: Timestamp,
-  pub evidence: Evidence,
-  pub stale: bool,
-  pub ambiguous: bool,
+  pub check_id:   String,
+  pub subject:    SubjectRef,
+  pub severity:   Severity,
+  pub weight:     i64,
+  pub revision:   u32,
+  pub sweep:      SweepId,
+  pub at:         Timestamp,
+  pub evidence:   Evidence,
+  pub stale:      bool,
+  pub ambiguous:  bool,
   pub eval_error: Option<String>,
 }
 
