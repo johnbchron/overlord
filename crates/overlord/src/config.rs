@@ -1,7 +1,11 @@
-use std::path::{Path, PathBuf};
+use std::{
+  net::{Ipv4Addr, SocketAddr},
+  path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use overlord_engine::SystemConfig;
+use overlord_web::auth::OidcConfig;
 use serde::{Deserialize, Serialize};
 
 /// The configuration file.
@@ -19,6 +23,12 @@ pub struct Config {
   pub sweep:   Sweep,
   #[serde(default)]
   pub systems: Vec<SystemConfig>,
+  #[serde(default)]
+  pub server:  Server,
+  /// Absent means no OIDC is configured, which confines the server to
+  /// `--dev-actor` on a loopback address.
+  #[serde(default)]
+  pub auth:    Option<Auth>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -67,6 +77,57 @@ impl Config {
       Err(e) => Err(
         anyhow::Error::new(e).context(format!("reading {}", path.display())),
       ),
+    }
+  }
+}
+
+/// Where the web server listens.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Server {
+  pub bind: SocketAddr,
+}
+
+impl Default for Server {
+  /// Loopback, because the default configuration has no authentication
+  /// and a default that listened to the network would be a trap.
+  fn default() -> Self {
+    Self {
+      bind: SocketAddr::from((Ipv4Addr::LOCALHOST, 8080)),
+    }
+  }
+}
+
+/// OIDC, as the file spells it (SPEC.md section 14).
+///
+/// The client secret is deliberately absent: it comes from
+/// `OVERLORD_OIDC_CLIENT_SECRET` and nowhere else, so a configuration
+/// file can be committed without leaking one.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Auth {
+  pub issuer:           String,
+  pub client_id:        String,
+  /// Must match what is registered with the provider exactly.
+  pub redirect_url:     String,
+  #[serde(default)]
+  pub allowed_subjects: Vec<String>,
+  #[serde(default)]
+  pub required_group:   Option<String>,
+}
+
+impl Auth {
+  /// Build the web crate's view of this configuration, pulling the
+  /// secret from the environment.
+  #[must_use]
+  pub fn to_oidc(&self) -> OidcConfig {
+    OidcConfig {
+      issuer:           self.issuer.clone(),
+      client_id:        self.client_id.clone(),
+      client_secret:    std::env::var("OVERLORD_OIDC_CLIENT_SECRET").ok(),
+      redirect_url:     self.redirect_url.clone(),
+      allowed_subjects: self.allowed_subjects.iter().cloned().collect(),
+      required_group:   self.required_group.clone(),
     }
   }
 }

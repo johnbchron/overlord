@@ -1,0 +1,417 @@
+/* overlord — the operator UI.
+ *
+ * One hand-rolled stylesheet, served from the binary at a content-hashed
+ * path. No framework and no build step: the surface is small, and the
+ * screens are dense tables rather than a design system.
+ *
+ * The board's job is to make the worst problems obvious (SPEC.md s8), so
+ * severity is the only place saturated colour is spent. Everything else
+ * is greyscale and spacing.
+ */
+
+:root {
+  color-scheme: light dark;
+
+  --bg: #fbfbfa;
+  --panel: #ffffff;
+  --panel-alt: #f5f5f4;
+  --line: #e0dedb;
+  --line-strong: #c9c6c1;
+  --ink: #1c1b19;
+  --ink-soft: #57544f;
+  --ink-faint: #85817a;
+  --accent: #2f5fd0;
+  --accent-soft: #e8eefb;
+
+  --critical: #b3261e;
+  --critical-bg: #fdecea;
+  --high: #b35309;
+  --high-bg: #fdf0e4;
+  --medium: #8a6d10;
+  --medium-bg: #fbf5e2;
+  --low: #4a5568;
+  --low-bg: #eef0f3;
+  --info: #6b7280;
+  --info-bg: #f2f3f5;
+
+  --ok: #1f7a4d;
+  --ok-bg: #e7f5ee;
+  --warn: #b35309;
+
+  --radius: 5px;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #171614;
+    --panel: #1f1e1c;
+    --panel-alt: #262523;
+    --line: #34322f;
+    --line-strong: #474441;
+    --ink: #eceae7;
+    --ink-soft: #b4b0aa;
+    --ink-faint: #837e77;
+    --accent: #7ba3f0;
+    --accent-soft: #1e2a44;
+
+    --critical: #f2837a;
+    --critical-bg: #3a1f1d;
+    --high: #e8a05c;
+    --high-bg: #35261a;
+    --medium: #d6bd63;
+    --medium-bg: #322c18;
+    --low: #9aa5b5;
+    --low-bg: #24262b;
+    --info: #9ca3af;
+    --info-bg: #232426;
+
+    --ok: #6cc397;
+    --ok-bg: #16291f;
+    --warn: #e8a05c;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.5 var(--sans);
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+code, .mono, .ref { font-family: var(--mono); font-size: 0.92em; }
+
+/* --- chrome --------------------------------------------------------- */
+
+.masthead {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding: 0 1.25rem;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  z-index: 20;
+}
+
+.brand {
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  padding: 0.85rem 0;
+}
+.brand:hover { text-decoration: none; }
+
+.masthead nav { display: flex; gap: 0.25rem; flex: 1; flex-wrap: wrap; }
+
+.masthead nav a {
+  padding: 0.85rem 0.7rem;
+  color: var(--ink-soft);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.masthead nav a:hover { color: var(--ink); text-decoration: none; }
+.masthead nav a[aria-current="page"] {
+  color: var(--ink);
+  border-bottom-color: var(--accent);
+  font-weight: 550;
+}
+
+.whoami {
+  color: var(--ink-faint);
+  font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+main { padding: 1.5rem 1.25rem 4rem; max-width: 1500px; margin: 0 auto; }
+
+h1 {
+  font-size: 1.35rem;
+  font-weight: 620;
+  letter-spacing: -0.02em;
+  margin: 0 0 0.25rem;
+}
+h2 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin: 1.75rem 0 0.6rem;
+}
+h3 { font-size: 0.9rem; font-weight: 600; margin: 1.25rem 0 0.5rem; }
+
+.lede { color: var(--ink-soft); margin: 0 0 1.25rem; max-width: 62ch; }
+
+.page-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+/* --- panels and tables ---------------------------------------------- */
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.panel + .panel { margin-top: 1rem; }
+.panel-body { padding: 0.9rem 1rem; }
+
+table { width: 100%; border-collapse: collapse; }
+
+th {
+  text-align: left;
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-faint);
+  padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel-alt);
+  white-space: nowrap;
+}
+
+td {
+  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid var(--line);
+  vertical-align: top;
+}
+tbody tr:last-child td { border-bottom: none; }
+tbody tr:hover { background: var(--panel-alt); }
+
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.shrink, th.shrink { width: 1%; white-space: nowrap; }
+
+.empty {
+  padding: 2rem 1rem;
+  text-align: center;
+  color: var(--ink-faint);
+}
+
+/* --- severity and state --------------------------------------------- */
+
+.sev {
+  display: inline-block;
+  padding: 0.1rem 0.45rem;
+  border-radius: 3px;
+  font-size: 0.72rem;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.sev-critical { color: var(--critical); background: var(--critical-bg); }
+.sev-high     { color: var(--high);     background: var(--high-bg); }
+.sev-medium   { color: var(--medium);   background: var(--medium-bg); }
+.sev-low      { color: var(--low);      background: var(--low-bg); }
+.sev-info     { color: var(--info);     background: var(--info-bg); }
+
+.tag {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  font-size: 0.72rem;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+.tag + .tag { margin-left: 0.25rem; }
+.tag-warn { color: var(--warn); border-color: currentColor; }
+.tag-ok   { color: var(--ok);   border-color: currentColor; }
+
+/* --- forms ---------------------------------------------------------- */
+
+button, .btn {
+  font: inherit;
+  font-size: 0.85rem;
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+  white-space: nowrap;
+}
+button:hover, .btn:hover { background: var(--panel-alt); text-decoration: none; }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+button.primary, .btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+button.primary:hover, .btn.primary:hover { filter: brightness(1.08); }
+button.linkish {
+  border: none;
+  background: none;
+  color: var(--accent);
+  padding: 0.15rem 0.3rem;
+}
+button.linkish:hover { text-decoration: underline; background: none; }
+
+input[type="text"], input[type="search"], input[type="number"],
+input[type="datetime-local"], select, textarea {
+  font: inherit;
+  font-size: 0.88rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--ink);
+  width: 100%;
+}
+textarea { font-family: var(--mono); line-height: 1.6; resize: vertical; }
+input:focus, select:focus, textarea:focus {
+  outline: 2px solid var(--accent);
+  outline-offset: -1px;
+  border-color: var(--accent);
+}
+
+label { display: block; }
+.field { margin-bottom: 0.9rem; }
+.field > span {
+  display: block;
+  font-size: 0.76rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-faint);
+  margin-bottom: 0.25rem;
+}
+.hint { font-size: 0.8rem; color: var(--ink-faint); margin-top: 0.2rem; }
+
+.row { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: flex-end; }
+.row > * { flex: 1 1 12rem; }
+.row > .shrink { flex: 0 0 auto; }
+
+.inline-form { display: inline; }
+
+/* --- filter bar ------------------------------------------------------ */
+
+.filters {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  padding: 0.75rem 1rem;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  margin-bottom: 1rem;
+}
+.filters .field { margin-bottom: 0; min-width: 9rem; }
+
+/* --- evidence -------------------------------------------------------- */
+
+.evidence {
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  color: var(--ink-soft);
+  margin-top: 0.25rem;
+  word-break: break-word;
+}
+.evidence b { color: var(--ink); font-weight: 600; }
+
+pre {
+  margin: 0;
+  padding: 0.75rem;
+  background: var(--panel-alt);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  line-height: 1.55;
+}
+
+/* --- inline expression diagnostics (PLAN.md s5) ---------------------- */
+
+.diagnostics { margin-top: 0.6rem; }
+.diagnostic {
+  border-left: 3px solid var(--critical);
+  background: var(--critical-bg);
+  padding: 0.5rem 0.7rem;
+  border-radius: 0 var(--radius) var(--radius) 0;
+  margin-bottom: 0.4rem;
+}
+.diagnostic .msg { color: var(--critical); font-weight: 550; }
+.diagnostic pre {
+  background: none;
+  border: none;
+  padding: 0.35rem 0 0;
+  color: var(--ink);
+}
+.diagnostic .caret { color: var(--critical); font-weight: 700; }
+.diagnostics.ok .diagnostic {
+  border-left-color: var(--ok);
+  background: var(--ok-bg);
+}
+.diagnostics.ok .diagnostic .msg { color: var(--ok); }
+
+/* --- stats ----------------------------------------------------------- */
+
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1.25rem;
+}
+.stat {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.7rem 0.85rem;
+}
+.stat .n {
+  font-size: 1.45rem;
+  font-weight: 620;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.stat .k {
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--ink-faint);
+}
+
+/* --- misc ------------------------------------------------------------ */
+
+.muted { color: var(--ink-faint); }
+.soft { color: var(--ink-soft); }
+.nowrap { white-space: nowrap; }
+.right { text-align: right; }
+.stack > * + * { margin-top: 0.5rem; }
+
+.banner {
+  padding: 0.6rem 0.9rem;
+  border-radius: var(--radius);
+  border: 1px solid;
+  margin-bottom: 1rem;
+}
+.banner-warn { color: var(--warn); border-color: currentColor; background: var(--high-bg); }
+.banner-err  { color: var(--critical); border-color: currentColor; background: var(--critical-bg); }
+.banner-ok   { color: var(--ok); border-color: currentColor; background: var(--ok-bg); }
+
+details > summary { cursor: pointer; color: var(--ink-soft); }
+details > summary:hover { color: var(--ink); }
+
+.htmx-request { opacity: 0.55; transition: opacity 0.1s; }
+
+.signin {
+  max-width: 24rem;
+  margin: 12vh auto;
+  text-align: center;
+}

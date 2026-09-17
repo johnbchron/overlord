@@ -109,6 +109,26 @@ impl SystemStatus {
   }
 }
 
+/// The column stores `as_str`, so reading a row back needs the inverse.
+/// A value outside the set means the file was written by a different
+/// version or edited by hand, which replay must refuse rather than
+/// silently coerce.
+impl std::str::FromStr for SystemStatus {
+  type Err = crate::error::StoreError;
+
+  fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+    match s {
+      "ok" => Ok(Self::Ok),
+      "partial" => Ok(Self::Partial),
+      "failed" => Ok(Self::Failed),
+      "skipped" => Ok(Self::Skipped),
+      other => Err(crate::error::StoreError::not_found(format!(
+        "system status {other}"
+      ))),
+    }
+  }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SweepStatus {
   Running,
@@ -125,6 +145,23 @@ impl SweepStatus {
       Self::Ok => "ok",
       Self::Partial => "partial",
       Self::Failed => "failed",
+    }
+  }
+}
+
+/// As [`SystemStatus`]: the inverse of what the column stores.
+impl std::str::FromStr for SweepStatus {
+  type Err = crate::error::StoreError;
+
+  fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+    match s {
+      "running" => Ok(Self::Running),
+      "ok" => Ok(Self::Ok),
+      "partial" => Ok(Self::Partial),
+      "failed" => Ok(Self::Failed),
+      other => Err(crate::error::StoreError::not_found(format!(
+        "sweep status {other}"
+      ))),
     }
   }
 }

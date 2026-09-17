@@ -36,6 +36,10 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 url = "2"
 toml = "0.9"
 proptest = "1"
+axum = { version = "0.8", features = ["macros"] }
+maud = { version = "0.27", features = ["axum"] }
+tower = "0.5"
+openidconnect = { version = "4", default-features = false, features = ["reqwest", "rustls-tls"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

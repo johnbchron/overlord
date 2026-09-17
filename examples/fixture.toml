@@ -5,12 +5,35 @@
 #   cargo run -- -c examples/fixture.toml checks enable mfa-missing
 #   cargo run -- -c examples/fixture.toml sweep
 #   cargo run -- -c examples/fixture.toml violations
+#
+# Then the operator UI, on http://127.0.0.1:8080:
+#
+#   cargo run -- -c examples/fixture.toml serve --dev-actor you
+#
+# `--dev-actor` authenticates nobody and refuses to bind anything but a
+# loopback address. A real deployment configures [auth] below instead.
+
+[server]
+bind = "127.0.0.1:8080"
 
 [store]
 path = "overlord.db"
 
 [sweep]
 absence_guard_pct = 10
+
+# Uncomment for real authentication (SPEC.md section 14). The client
+# secret comes from OVERLORD_OIDC_CLIENT_SECRET and never from this file.
+# Set OVERLORD_SESSION_KEY to 64 hex characters so sessions survive a
+# restart. Authentication alone is not sufficient: without
+# `allowed_subjects` or `required_group`, overlord refuses to start.
+#
+# [auth]
+# issuer           = "https://id.example.com"
+# client_id        = "overlord"
+# redirect_url     = "https://overlord.example.com/auth/callback"
+# allowed_subjects = ["you@example.com"]
+# required_group   = "secops"
 
 [[systems]]
 id = "gws-prod"

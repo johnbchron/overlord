@@ -8,6 +8,7 @@
 //! uses.
 
 pub mod db;
+pub mod detail;
 pub mod error;
 pub mod project;
 pub mod read;
@@ -16,8 +17,12 @@ pub mod streams;
 pub mod violations;
 
 pub use db::{Db, Reader, Writer};
+pub use detail::{
+  CheckRevisionRow, CoverageRow, DryRunRow, EntityDetail, EpisodeRow, EventRow,
+  FactRowSummary, PersonDetail, SubjectHit, SweepRow, SystemRow,
+};
 pub use error::{Result, StoreError};
-pub use read::{Counts, EntityState, ScoreRow, ViolationRow};
+pub use read::{Counts, EntityState, ScoreRow, ViolationFilter, ViolationRow};
 pub use streams::{
   FactRow, NewFact, SweepStart, SweepStatus, SweepSummary, SystemOutcome,
   SystemStatus,

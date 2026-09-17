@@ -4,7 +4,7 @@ Working log for the build described in [PLAN.md](PLAN.md). Updated as work
 lands, not in advance. Spec references like (§7) point at
 [SPEC.md](SPEC.md); plan references at PLAN.md.
 
-**Current milestone:** M1 — Core and one system. **Complete.**
+**Current milestone:** M2 — Operator UI. **Complete.**
 
 ---
 
@@ -24,19 +24,24 @@ lands, not in advance. Spec references like (§7) point at
 | 10 | CLI | done |
 | 11 | `replay(streams) == live` | done |
 
-`cargo test --workspace`: **154 passing, 0 failing.**
-`cargo clippy --workspace --all-targets`: **no warnings.**
+| # | M2 task | State |
+| --- | --- | --- |
+| 12 | `overlord-web` skeleton, css, vendored htmx, hashed assets | done |
+| 13 | Violations board with filters and "new since last sweep" | done |
+| 14 | Violation actions, stale acknowledgements flagged | done |
+| 15 | Rules screen and check editor | done |
+| 16 | Users, person/entity detail, sweeps + coverage, systems, settings | done |
+| 17 | Sweep from the UI | done |
+| 18 | OIDC, `--dev-actor` confined to loopback | done |
 
-M2 (UI), M3 (identity), M4 (real connectors), M5 (lifecycle polish) are
-untouched. `suggestion` is a table with no writer yet — M3 fills it, and
+`cargo test --workspace`: **193 passing, 0 failing.**
+`cargo clippy --workspace --all-targets -- -D warnings`: **clean.**
+
+M3 (identity), M4 (real connectors), M5 (lifecycle polish) are untouched.
+`suggestion` is still a table with no writer — M3 fills it, and
 `suppress_if_pending_links` is implemented against it and therefore inert
-until then.
-
-Three read models were written in M1 and still have no caller:
-`Reader::false_positive_rate`, `Reader::has_dryrun` and
-`Reader::last_sweep_covering`. They are not dead code to delete — each
-answers a question an M2 screen asks — but nothing exercises them yet,
-so treat them as untested until a screen does.
+until then. The entity detail page renders pending suggestions already,
+so that screen needs no further work when M3 starts producing them.
 
 ### Try it
 
@@ -47,133 +52,189 @@ cargo run -- -c examples/fixture.toml checks import examples/starter-checks.json
 cargo run -- -c examples/fixture.toml checks dry-run mfa-missing
 cargo run -- -c examples/fixture.toml checks enable mfa-missing
 cargo run -- -c examples/fixture.toml sweep
-cargo run -- -c examples/fixture.toml violations
-cargo run -- -c examples/fixture.toml users
-cargo run -- -c examples/fixture.toml rebuild
+cargo run -- -c examples/fixture.toml serve --dev-actor you
 ```
+
+Then http://127.0.0.1:8080. `--dev-actor` authenticates nobody and
+refuses to bind anything but a loopback address.
 
 ---
 
-## Starting M2 — handoff
+## Starting M3 — handoff
 
-Written at the end of M1 for a reader with no prior context. PLAN.md §4
-lists the M2 tasks; this is what the code actually leaves you, and the
-traps that are not visible from the outside.
+Written at the end of M2. PLAN.md §4 lists the M3 tasks (identity:
+suggestions, confirm/link/unlink/primary, merge and split, promotion of
+implicit persons, `suppress_if_pending_links`). This is what the code
+actually leaves you.
 
-### Where it plugs in
+### What M2 added that M3 builds on
 
-Add `crates/overlord-web` (axum + maud) and a `serve` subcommand to
-`crates/overlord/src/main.rs`, which is already `#[tokio::main]`. The
-dependency edge is `overlord-web → overlord-engine, overlord-store,
-overlord-core`; nothing should make the store or the engine depend on the
-web crate. `crates/overlord/src/render.rs` is the CLI's terminal
-rendering and is **not** a template to port — maud pages should be
-written fresh; only the field choices are worth copying.
+`crates/overlord-web` is nine page modules plus `actions.rs`, all
+server-rendered maud over axum, with htmx for fragment swaps. There is
+no JSON API and no client-side model: a screen is a function from the
+projections to markup, and a fragment handler renders exactly the markup
+the full page would have produced for that region, by calling into the
+same function. Keep that property — it is why a filtered board and a
+re-rendered single row cannot disagree about how a violation looks.
 
-`assets/` exists but is empty, so it is untracked and a fresh clone will
-not have it. htmx has to be vendored there at a pinned version and
-`overlord.css` written from scratch.
+The identity screens M3 needs are **already rendering, read-only**:
 
-### Read models: what exists, what each screen still needs
+- `pages/subject.rs::person` shows a person's accounts, their designated
+  primaries per system kind, their own violations and their accounts'
+  violations, and says plainly when the person is implicit.
+- `pages/subject.rs::entity` shows pending suggestions from the
+  `suggestion` table with their signal and evidence. Nothing writes that
+  table yet, so the section is invisible in practice; the moment M3's
+  suggestion computation lands it appears with no view work.
 
-`overlord_store::Reader` (see `crates/overlord-store/src/read.rs`) has 22
-methods. These cover M2 as-is:
+So M3's UI work is mostly **adding the verbs**: a confirm button on each
+suggestion, a manual link form, unlink, set-primary, merge and split.
+`actions.rs` is the pattern to follow — every handler there takes an
+`Identity`, appends one `NewCommand` with a form-supplied idempotency
+key, and returns either a re-rendered fragment or a redirect.
 
-- Violations board — `violations(states, limit)`, which already carries
-  the per-system `new_since` flag
-- Rules list — `checks()`, `open_counts_by_check()`,
-  `false_positive_rate(check)` (written in M1, never called yet)
-- Check editor — `check_revision(id, rev)`, `has_dryrun(id, rev)`
-- Users — `top_subjects(limit)`
-- Systems — `known_systems()`, `counts()`
+### Read models: what exists now
 
-These do **not** exist yet and each screen below needs one written:
+`overlord_store::Reader` gained `crates/overlord-store/src/detail.rs` in
+M2, alongside the evaluation-facing models in `read.rs`. New and useful
+to M3:
 
-| screen | missing read model |
-| --- | --- |
-| Violations board | filters. `violations()` takes only `(states, limit)` — no severity, system, check or subject filter. §5 wants all four. The "new since" split is done: read `ViolationRow.new_since` |
-| Person / entity detail | the whole thing: identities and links for one person, one entity's current state, its violation history, its fact timeline |
-| Violation detail | `violation_event` rows for one `(check, subject, episode)` — the table is written, never read |
-| Check editor | stored dry-run samples. `check_dryrun.samples` holds them as JSON; nothing reads them back |
-| Rules list | revision history for one check — `check_revision` is written, and only the *current* revision is ever read |
-| Sweeps + coverage | sweep list, and `sweep_system` rows for one sweep. Both written every run, neither read |
+- `person_detail(uid)` — resolves merge aliases first, and handles an
+  implicit uid by deriving everything from the entity behind it
+- `entity_detail(entity)` — includes absent entities, unlike
+  `entity_states`
+- `suggestions_for(entity)` — reads the table M3 will start writing
+- `search_subjects(query, limit)` — persons and entities by name or key
+- `violation_episodes(check, subject)` — every episode with its events
+- `sweeps`, `sweep`, `coverage`, `systems`, `check_revisions`, `dryrun`
 
-`Writer::standing_episodes()` and `Reader::expired_suppressions()` are
-evaluation internals, not board queries — do not build screens on them.
+`ViolationFilter` (in `read.rs`) is how the board narrows: states,
+severities, systems, checks, an exact subject, and a case-folded subject
+substring, all applied in SQL so `limit` keeps meaning "the worst N that
+match".
 
-### Three traps
+### Traps, carried forward and new
 
-**1. "New since last sweep" is already computed — don't recompute it.**
-`ViolationRow.new_since` is set by the read model, per system. Read the
-flag; do not filter on `opened_sweep == latest_sweep()` in a handler.
-That was the original CLI bug (fixed 2026-09-17, see the log): a sweep
-restricted to one system emptied the "new" section for every *other*
-system, which is precisely the manufactured change §10 forbids.
+**The three M1 traps still hold.** `ViolationRow.new_since` is computed
+by the read model — read the flag, never recompute it. A `SubjectRef`
+never goes in a URL path segment; `view::subject_href` puts it in a
+query parameter and `view::urlencode` encodes it. Every command needs an
+`Actor` and an idempotency key.
 
-The semantics, so the board renders them honestly: an entity-scoped
-violation is new when it opened in the latest sweep covering **its own
-system**; a person-scoped one when it opened in the latest sweep
-overall, because person checks are re-evaluated on every run whatever it
-covered. A system never swept has no benchmark, so nothing on it is new.
-`Reader::latest_sweep_per_system()` is the underlying query if a screen
-needs the benchmark itself.
+**New: `Db` must stay `Send + Sync`.** The web server shares one handle
+across every request task. M2 found the in-memory keeper connection was a
+bare `Connection` field, which is `Send` but not `Sync`, and moved it
+behind a `Mutex`. `the_handle_can_be_shared_across_threads` in `db.rs`
+asserts it so the next bare connection field fails at test time rather
+than in a handler signature.
 
-**2. A `SubjectRef` must never go in a URL path segment.** It renders as
-`entity/<system>/<type>/<key>` — embedded slashes by construction — and
-the key itself may contain more (`EntityRef` parses with `splitn(3)`
-precisely because some vendors use path-shaped ids; there is a test).
-Put it in a query parameter, or percent-encode it whole. Routing on
-`/violations/:subject` will silently mangle real data.
+**New: a store refusal usually arrives wrapped in an `EngineError`.**
+`WebError::status` originally matched only `WebError::Store(Rejected)`,
+so `checks::enable` refusing a revision with no dry-run — a §7 contract —
+rendered as a blank 500 instead of a 409 with the reason. It now unwraps
+`Engine(Store(_))` as well. Anything new that goes through the engine
+inherits this; anything that bypasses it will need its own arm.
 
-**3. Every command needs an `Actor`, and there is no web one yet.**
-`NewCommand::new(actor, kind, at)` — the CLI passes `cli:<name>`. The web
-layer must pass the authenticated OIDC subject (§14: every command
-records the authenticated actor). Until OIDC lands, PLAN.md task 18's
-`--dev-actor` should refuse to bind a non-loopback address. Also give
-each rendered form its own idempotency key: `append_command` returns
-`Applied { duplicate: true }` and does nothing on a repeat, which is what
-makes a double-submitted acknowledge harmless.
+**New: person-scoped violations survive the system facet.** A person
+spans systems, so filtering the board to one system keeps them rather
+than excluding them — excluding them would hide exactly the
+cross-system findings the filter is being used to investigate. Asserted
+by `a_person_scoped_violation_survives_the_system_facet`.
+
+**New: the dry-run gate is enforced twice, deliberately.** The editor
+hides the Enable button without a dry-run for the revision on screen, and
+the store refuses the command regardless. Do not "simplify" this to one:
+a gate that exists only in a template is not a gate, and
+`enabling_is_refused_without_a_dry_run_for_that_revision` posts straight
+past the template to prove it.
 
 ### Smaller things worth knowing
 
-- **Sweep progress needs no new machinery.** The `sweep` row is the
-  progress record: `status = 'running'` from `open_sweep` until
-  `commit_sweep`. A background tokio task plus an htmx poll on that row
-  is the whole feature.
-- **The check editor's errors are already built.** `overlord_expr::compile`
-  returns `Vec<Diagnostic>`, each with a byte `span`, a `message` and an
-  optional `help`; `EngineError::BadCondition` carries them through.
-  `Diagnostic::render` draws a caret underline for the terminal — the
-  editor should use `span` directly and underline in HTML instead.
-  `engine::checks::validate` is the no-save validation entry point.
-- **Evidence renders itself.** `EvidenceLeaf.expr` is the condition's own
-  source text for that leaf and `.value` is a `Value` with a `Display`
-  impl, so a row reads `count(groups where external) = 2` with no
-  formatting logic in the view.
-- **Three flags belong on every violation row** and are already
-  populated: `stale` (evaluated from last-known state during a partial
-  sweep), `ambiguous` (a selector matched several entities with no
-  designated primary — an identity-work signal, not a rule failure), and
-  `overlay_stale` (the acknowledgement was made under an earlier check
-  revision, which §6.5 wants flagged).
-- **`Db::read` / `Db::write` are generic over the error type.** Closures
-  that mix raw rusqlite calls need `-> overlord_store::Result<_>`;
-  closures calling typed read models infer fine. Handlers returning a web
-  error type will need the annotation or a `From<StoreError>` impl.
-- **Don't reach for `Reader::conn()`.** It is the read-only escape hatch
-  for exports and tests. Screens should get typed read models, so the SQL
-  stays in one crate.
+- **Sessions.** A signed cookie, no server-side table:
+  `blake3::keyed_hash` over the claims. The key is
+  `OVERLORD_SESSION_KEY` (64 hex characters) or an ephemeral one derived
+  at startup with a warning. OIDC discovery is lazy and cached, so
+  overlord boots with the provider down.
+- **`--dev-actor` refuses a non-loopback bind**, and OIDC with neither
+  `allowed_subjects` nor `required_group` refuses to start at all —
+  authentication alone is not sufficient (§14). Both are checked in
+  `overlord_web::serve`, before the listener is bound.
+- **Assets are hashed at startup** from their own bytes
+  (`assets.rs`), served immutable, and 404 on a stale path. There is no
+  build step and nothing to invalidate.
+- **The sweep row is the progress record.** `sweeprun::SweepRunner` holds
+  only what the store cannot answer: whether a task is in flight before
+  it has opened its row, and why the last one died if it died before
+  recording anything. The page polls `/sweeps/progress`, which stops
+  polling by returning markup with no trigger and an `HX-Refresh`.
+- **Two sweeps at once are refused, not queued.** They would interleave
+  facts under two different definitions of "now" (§10).
+- **`view.rs` is the shared vocabulary** — severity, state, timestamps,
+  subject links, evidence, flags, diagnostics. A new screen should reach
+  for it rather than restyling a badge.
+
+
+### The stylesheet, and how to add to it
+
+`assets/overlord.css` is one hand-rolled file, no framework and no build
+step, compiled into the binary by `include_str!` and served at a
+content-hashed path. Editing it is enough — the hash is recomputed from
+the bytes at startup, so there is nothing to invalidate and no way to
+serve a stale copy. `cargo` does track the `include_str!` dependency, but
+if the served hash ever looks wrong the cause is almost always a stale
+server process still holding the port, not a stale build.
+
+**The organising idea is that severity is structural, not decorative.**
+SPEC.md §2 asks for loud problems to dominate and quiet ones to be merely
+recorded, so:
+
+- every violation row carries a 3px colour **spine** in its own severity
+  (`tbody tr:has(.sev-critical) td:first-child`), so a queue scans
+  vertically as a heat trace before a word of it is read;
+- **badge weight falls off a cliff** below `high` — `critical` is the
+  only solid fill on the screen, `high`/`medium` are tinted, `low`/`info`
+  are outline-only and recede;
+- critical rows carry a low-alpha warm tint, so the worst of a long queue
+  is findable by glance down the page.
+
+Keep that. A new screen that shows violations should get the spine for
+free by rendering `view::severity`, and anything that reimplements a
+severity badge by hand breaks the one place the rule lives.
+
+**The class vocabulary is closed and small.** `panel` / `panel-body`,
+`row` / `field` / `hint`, `tag` (+ `tag-ok`, `tag-warn`), `sev-*`,
+`banner-*`, `stat` / `n` / `k`, `evidence`, `ref`, `muted` / `soft`,
+`shrink` / `num` / `nowrap` / `right`, `stack`, `empty`, `lede`. Reach for
+these; `view.rs` already wraps most of them. `k` is the label style,
+shared by `.field > span` and the detail pages' key/value pairs.
+
+**Two traps in the CSS itself:**
+
+- `.panel` uses `overflow: clip`, **not** `hidden`. `hidden` would make
+  it a scroll container, and the sticky `th` headings would then stick to
+  a box that never scrolls — which is to say, not at all. `clip` rounds
+  the same corners without creating one. This was a real bug caught
+  during the pass; do not "tidy" it back.
+- Sticky headings are offset by `--masthead-h`, which the masthead also
+  uses as its literal `height`. If the masthead's height ever becomes
+  content-driven again, the two silently disagree and the headings sit
+  under it.
+
+**Browser baseline.** `:has()` and `color-mix()` are used deliberately
+(Baseline 2023). Both degrade safely — no spine, no tint, never a *wrong*
+colour — and the badge always states the severity in text. No webfonts,
+ever: an air-gapped deployment should not need a network fetch to render
+a stylesheet, which also keeps the asset story to two files.
+
+**Unreviewed.** The visual direction landed after M2 was committed and
+has not had operator feedback yet. Three things were flagged as most
+likely to change: the teal accent, the critical-row tint (possibly too
+much at real volume), and the spine width. Treat them as provisional.
 
 ## Open questions for the operator
 
-1. **rustfmt needs nightly.** `rustfmt.toml` sets ten options
-   (`imports_granularity`, `group_imports`,
-   `struct_field_align_threshold`, `wrap_comments`, `format_strings`,
-   `fn_single_line`, and four more) that only nightly rustfmt honours.
-   The flake pins stable, so `cargo fmt` ignores all ten with a warning
-   each. The tree is currently formatted by *stable* rustfmt. Either add
-   a nightly rustfmt to the flake or trim `rustfmt.toml` to the stable
-   subset.
+1. ~~**rustfmt needs nightly.**~~ Resolved: the flake now pulls nightly,
+   and the tree is formatted by it. `cargo fmt --all -- --check` is clean.
 
 2. **The absence guard is sharp at small N.** §10 specifies "more than a
    configured share (default 10%)", implemented literally. In a
@@ -185,19 +246,37 @@ makes a double-submitted acknowledge harmless.
    `the_percentage_guard_is_sharp_in_a_small_system`. This sharpens
    §17's second open question.
 
-3. **`checks import` is an M1 bootstrap.** §15 makes the UI the only
-   place checks are authored and forbids a file-based rule format. There
-   is no UI until M2, so the CLI has `checks import`, which reads JSON
-   and emits ordinary `check.upsert` commands. The stream stays
-   authoritative and there is no rule file to reconcile — the file is an
-   input, never a source of truth. It should be reconsidered once the
-   editor exists.
+   M2 does not change the rule, but it does make the consequence
+   visible: the coverage view and the Systems screen both show a tripped
+   guard in place, so an operator meets it as a prompt to confirm a
+   snapshot rather than as a silent non-event.
 
-4. **Evaluation errors have no home projection yet.** A condition that
+3. **`checks import` outlived its bootstrap.** §15 makes the UI the only
+   place checks are authored and forbids a file-based rule format. The
+   editor now exists, so the CLI's `checks import` is no longer needed to
+   get a rule into the system and should probably go. It is still the
+   fastest way to seed a demo, and `examples/fixture.toml` documents it
+   as such — so it is left in place for M3 rather than removed on the
+   same day the editor landed. The decision is yours.
+
+4. **Evaluation errors still have no home projection.** A condition that
    fails against a subject is recorded on the standing episode's
    `eval_error` and returned in the sweep report, but a check with no
-   standing violation has nowhere to put it. The Rules screen (M2) wants
-   a `check_problem` projection; noted rather than built.
+   standing violation has nowhere to put it. M2's Rules screen shows
+   open counts, zero-match flags and false-positive rates, and the
+   violation detail page surfaces `eval_error` where an episode carries
+   one — but a rule that errors against *every* subject still shows as a
+   quiet zero-match rule rather than as a broken one. A `check_problem`
+   projection would close this; noted again rather than built, because it
+   is a schema addition and M2 was not the milestone for it.
+
+5. **Suppression expiry is entered as UTC.** The suppress form uses an
+   HTML `datetime-local` input, which sends wall-clock with no zone.
+   overlord records UTC only (§13), so the value is read as UTC and the
+   field says so, rather than being quietly reinterpreted in the
+   server's local zone — which would expire a suppression at an hour
+   nobody chose. If operators find that surprising, the fix is a zone
+   picker, not a silent conversion.
 
 ---
 
@@ -455,3 +534,130 @@ comparison would have found nothing, so the test would fail against the
 previous implementation rather than passing vacuously.
 
 `cargo test --workspace`: 154 passing, 0 failing.
+
+### 2026-09-17 — M2: the operator UI (tasks 12–18)
+
+`crates/overlord-web`: axum routing, maud pages, one hand-rolled
+stylesheet, vendored htmx 2.0.4. Nine page modules, `actions.rs` for
+everything that writes, `view.rs` for the vocabulary every screen shares.
+The binary gained `serve`.
+
+**Fragments are the pages, narrowed.** A filtered board and a
+re-rendered single row call the same functions the full page does, so
+they cannot drift. `/violations/rows` returns the board without the
+chrome; `/violations/act` with an `HX-Request` header returns exactly one
+`<tr>`. No JSON crosses the wire and there is no client-side model.
+
+**Filters went into SQL, not into the handler.** `ViolationFilter` carries
+states, severities, systems, checks, an exact subject and a case-folded
+subject substring, all bound as parameters. Filtering the result instead
+would have made `limit` a lie: it has to mean "the worst N that match",
+and trimming afterwards drops matches behind the cut. The system facet
+deliberately keeps person-scoped violations — a person spans systems, so
+narrowing to one cannot sensibly exclude them, and doing so would hide
+exactly the cross-system findings the filter is used to investigate.
+
+**Subject refs travel as query parameters.** `entity/<system>/<type>/<key>`
+has embedded slashes by construction and vendor keys add more, so
+`/entity?ref=…` and `/person?uid=…` with whole-value percent-encoding,
+per the M1 handoff's second trap. Row DOM ids are a blake3 prefix of
+`(check, subject, episode)` rather than the ref itself, because neither
+a check id nor a subject ref is safe as an HTML id.
+
+**The dry-run gate is enforced twice on purpose.** The editor disables
+Enable without a dry-run for the revision on screen; the store refuses
+the command regardless. `enabling_is_refused_without_a_dry_run_for_that_revision`
+posts straight past the template — and caught a real bug doing it:
+`WebError::status` matched only `Store(Rejected)`, so a refusal arriving
+wrapped in `EngineError::Store` rendered as a blank 500 instead of a 409
+with the operator-facing reason. That path covers every engine-mediated
+refusal, not just this one.
+
+**`Db` had to become `Sync`.** The server shares one handle across every
+request task. The in-memory keeper connection was a bare `Connection` —
+`Send` but not `Sync` — so the whole handle was unshareable. It is behind
+a `Mutex` now, and `the_handle_can_be_shared_across_threads` asserts the
+property so the next bare connection field fails at test time rather than
+as an inscrutable `Handler` trait error.
+
+**Check editor diagnostics use spans, as PLAN.md §5 promised.**
+`/rules/validate` compiles on blur and returns every diagnostic at once,
+each rendered as the source line with a caret run under exactly the
+reported bytes and the help text beneath. It takes only the condition and
+the scope, not the whole form: a half-written new check must still get
+its condition underlined, and demanding an id first would make the editor
+useless exactly when it is most wanted.
+
+**Sweeps needed no new machinery**, as the M1 handoff said. A background
+tokio task, the `sweep` row as the progress record, and an htmx poll on
+`/sweeps/progress` that stops by returning markup with no trigger plus an
+`HX-Refresh`. Two concurrent sweeps are refused rather than queued: they
+would interleave facts under two different definitions of "now" (§10).
+
+**Auth is an extractor, not a middleware call.** A handler that takes
+`Identity` cannot run without one, so there is no "check the session"
+step to forget — `without_oidc_no_command_can_reach_the_store` walks
+every read and write route and asserts nothing is appended. Sessions are
+a signed cookie (`blake3::keyed_hash`) with no server-side table; OIDC
+discovery is lazy and cached so overlord boots with the provider down.
+`--dev-actor` refuses a non-loopback bind, and OIDC with neither
+`allowed_subjects` nor `required_group` refuses to start at all —
+authentication alone is not sufficient (§14).
+
+The `groups` claim is read from the id token's payload after the library
+has verified it. The signature covers that payload, so re-reading it for
+a provider-specific claim adds no trust; the alternative was threading a
+custom `AdditionalClaims` type through six generic parameters of
+`openidconnect`'s client.
+
+Three M1 read models that had no caller now have one:
+`false_positive_rate` on the Rules screen, `has_dryrun` behind the enable
+gate, and `latest_sweep_per_system` behind the board's "new since"
+split.
+
+`cargo test --workspace`: 193 passing, 0 failing.
+
+### 2026-09-17 — visual pass on the stylesheet
+
+Landed after M2 was committed, on the brief "pick a direction". Not a
+milestone task; recorded because it changes a contract the next screen
+will inherit.
+
+**Severity became structural rather than decorative.** The old sheet
+expressed priority only as a coloured chip, so every row was otherwise
+identical and the board read as a uniform list that had to be parsed.
+Now: a colour spine down each row, badge weight that falls off a cliff
+below `high` (critical is the only solid fill anywhere), and a low-alpha
+warm tint on critical rows. §2's "loud problems dominate, quiet ones are
+merely recorded" is now legible in the pixels rather than only in the
+ordering. The accent moved from a generic blue to a deep teal, and the
+brand mark became a filled square — the same shape as the spine, so the
+mark and the board share one vocabulary.
+
+Supporting work: a real type scale, `tabular-nums` on `body` so every
+count and column lines up without each call site asking, sticky table
+headings, `:focus-visible` rings, and a disclosure triangle on
+`<details>`.
+
+**`.k` was styled only inside `.stat`.** The detail pages use
+`div class="k muted"` sixteen times as a key/value label and were getting
+nothing but the muted colour. It is now a first-class label style shared
+with `.field > span`.
+
+**A bug introduced and caught inside the same pass.** Adding sticky `th`
+headings while `.panel` still had `overflow: hidden` would have been
+silently inert — `hidden` makes the panel a scroll container, so the
+headings stick to a box that never scrolls. `overflow: clip` clips the
+same rounded corners without creating one. Worth knowing because the
+symptom is *nothing happening*, which is easy to misread as unsupported
+`position: sticky`.
+
+`:has()` and `color-mix()` are used deliberately (Baseline 2023); both
+degrade to no spine and no tint rather than to a wrong colour, and the
+badge always states the severity in text.
+
+The direction has not had operator feedback yet. Flagged as most likely
+to change: the teal, the critical-row tint at real volume, and the spine
+width.
+
+`cargo test --workspace`: 193 passing, 0 failing.

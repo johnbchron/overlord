@@ -291,9 +291,49 @@ impl Reader<'_> {
     }
     Ok(current)
   }
+}
 
-  // --- violations -----------------------------------------------------
+// --- violations -------------------------------------------------------
 
+/// What the board is narrowed to (SPEC.md section 5: filters by
+/// severity, system, check, subject, and lifecycle state).
+///
+/// An empty vector means "no restriction on this facet", not "match
+/// nothing" — the screen's unfiltered state is the default value.
+#[derive(Debug, Clone)]
+pub struct ViolationFilter {
+  pub states:       Vec<ViolationState>,
+  pub severities:   Vec<Severity>,
+  /// Restricts entity-scoped violations to these systems. A
+  /// person-scoped violation spans systems and so is never excluded
+  /// by this facet.
+  pub systems:      Vec<SystemId>,
+  pub checks:       Vec<CheckId>,
+  pub subject:      Option<SubjectRef>,
+  /// A case-folded substring of the subject ref, for the board's search
+  /// box. Applied in SQL alongside the other facets so `limit` keeps
+  /// meaning "the worst N that match".
+  pub subject_like: Option<String>,
+  pub limit:        usize,
+}
+
+impl Default for ViolationFilter {
+  /// The board's own default: what currently counts as bad state
+  /// (SPEC.md section 9).
+  fn default() -> Self {
+    Self {
+      states:       vec![ViolationState::Open, ViolationState::Acknowledged],
+      severities:   Vec::new(),
+      systems:      Vec::new(),
+      checks:       Vec::new(),
+      subject:      None,
+      subject_like: None,
+      limit:        500,
+    }
+  }
+}
+
+impl Reader<'_> {
   /// The board: active violations, worst first, then longest-ignored
   /// (SPEC.md section 8).
   ///
@@ -304,13 +344,127 @@ impl Reader<'_> {
     states: &[ViolationState],
     limit: usize,
   ) -> Result<Vec<ViolationRow>> {
+    self.violations_where(&ViolationFilter {
+      states: states.to_vec(),
+      limit,
+      ..ViolationFilter::default()
+    })
+  }
+
+  /// The board, narrowed by [`ViolationFilter`].
+  ///
+  /// Every facet is applied in SQL rather than by filtering the result,
+  /// because `limit` has to mean "the worst N that match" — trimming
+  /// after the fact would silently drop matches behind the cut.
+  ///
+  /// # Errors
+  /// On a SQLite failure or unreadable stored JSON.
+  #[allow(clippy::too_many_lines)]
+  pub fn violations_where(
+    &self,
+    filter: &ViolationFilter,
+  ) -> Result<Vec<ViolationRow>> {
+    if filter.states.is_empty() {
+      return Ok(Vec::new());
+    }
     let latest_per_system = self.latest_sweep_per_system()?;
     let latest_overall = self.latest_sweep()?;
-    let wanted: Vec<&str> = states.iter().map(|s| s.as_str()).collect();
-    let placeholders = (1..=wanted.len())
-      .map(|i| format!("?{i}"))
-      .collect::<Vec<_>>()
-      .join(", ");
+
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    let mut clauses: Vec<String> = Vec::new();
+
+    let bind =
+      |params: &mut Vec<Box<dyn rusqlite::ToSql>>, v: String| -> String {
+        params.push(Box::new(v));
+        format!("?{}", params.len())
+      };
+
+    let list = |params: &mut Vec<Box<dyn rusqlite::ToSql>>,
+                values: Vec<String>|
+     -> String {
+      values
+        .into_iter()
+        .map(|v| bind(params, v))
+        .collect::<Vec<_>>()
+        .join(", ")
+    };
+
+    let states = list(
+      &mut params,
+      filter
+        .states
+        .iter()
+        .map(|s| s.as_str().to_owned())
+        .collect(),
+    );
+    clauses.push(format!("v.state IN ({states})"));
+
+    if !filter.severities.is_empty() {
+      let s = list(
+        &mut params,
+        filter
+          .severities
+          .iter()
+          .map(|s| s.as_str().to_owned())
+          .collect(),
+      );
+      clauses.push(format!("v.severity IN ({s})"));
+    }
+
+    if !filter.checks.is_empty() {
+      let c = list(
+        &mut params,
+        filter.checks.iter().map(ToString::to_string).collect(),
+      );
+      clauses.push(format!("v.check_id IN ({c})"));
+    }
+
+    if let Some(subject) = &filter.subject {
+      let s = bind(&mut params, subject.to_string());
+      clauses.push(format!("v.subject_ref = {s}"));
+    }
+
+    if let Some(text) = &filter.subject_like
+      && !text.trim().is_empty()
+    {
+      // Escaped explicitly: an entity key is vendor-supplied, and a `%`
+      // or `_` typed into the search box must match itself rather than
+      // silently widening the search.
+      let escaped = text
+        .to_lowercase()
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+      let s = bind(&mut params, format!("%{escaped}%"));
+      clauses.push(format!("lower(v.subject_ref) LIKE {s} ESCAPE '\\'"));
+    }
+
+    if !filter.systems.is_empty() {
+      // A prefix comparison on the rendered ref rather than a LIKE:
+      // `subject_ref` is `entity/<system>/<type>/<key>`, and an exact
+      // prefix needs no escaping of whatever a vendor put in the key.
+      //
+      // Person-scoped violations are kept regardless. A person spans
+      // systems, so "only show me okta-prod" cannot sensibly exclude
+      // one, and dropping them would hide exactly the cross-system
+      // findings the system filter is being used to investigate.
+      let ors: Vec<String> = filter
+        .systems
+        .iter()
+        .map(|sys| {
+          let p = bind(&mut params, format!("entity/{sys}/"));
+          format!("substr(v.subject_ref, 1, length({p})) = {p}")
+        })
+        .collect();
+      clauses.push(format!(
+        "(v.subject_kind = 'person' OR {})",
+        ors.join(" OR ")
+      ));
+    }
+
+    params.push(Box::new(i64::try_from(filter.limit).unwrap_or(i64::MAX)));
+    let limit_param = format!("?{}", params.len());
+
     let sql = format!(
       "SELECT v.check_id, v.subject_ref, v.episode, v.state, v.severity,
               v.weight, v.opened_at, v.opened_sweep, v.evidence, v.stale,
@@ -319,17 +473,12 @@ impl Reader<'_> {
          LEFT JOIN check_head h ON h.check_id = v.check_id
          LEFT JOIN check_revision r
            ON r.check_id = v.check_id AND r.revision = h.revision
-        WHERE v.state IN ({placeholders})
+        WHERE {}
         ORDER BY v.weight DESC, v.opened_at ASC, v.check_id
-        LIMIT ?{}",
-      wanted.len() + 1
+        LIMIT {limit_param}",
+      clauses.join(" AND ")
     );
 
-    let mut params: Vec<Box<dyn rusqlite::ToSql>> = wanted
-      .iter()
-      .map(|s| Box::new((*s).to_owned()) as Box<dyn rusqlite::ToSql>)
-      .collect();
-    params.push(Box::new(i64::try_from(limit).unwrap_or(i64::MAX)));
     let refs: Vec<&dyn rusqlite::ToSql> =
       params.iter().map(AsRef::as_ref).collect();
 

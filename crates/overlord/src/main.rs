@@ -1,14 +1,13 @@
 //! The overlord binary.
 //!
 //! SPEC.md section 13: one binary; the web server and the CLI are two
-//! front ends over the same core library. The web server arrives in M2;
-//! until then this is the only front end, and it is deliberately
-//! non-interactive so it can be scripted.
+//! front ends over the same core library. `serve` starts the UI; every
+//! other verb is non-interactive so it can be scripted.
 
 mod config;
 mod render;
 
-use std::path::PathBuf;
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
@@ -20,6 +19,9 @@ use overlord_core::{
 };
 use overlord_engine::{SweepPlan, checks, run_sweep};
 use overlord_store::Db;
+use overlord_web::{
+  AppState, auth::AuthMode, oidc::Oidc, sweeprun::SweepRunner,
+};
 
 use crate::config::Config;
 
@@ -90,6 +92,19 @@ enum Command {
   /// Drop every projection and replay the streams.
   Rebuild,
 
+  /// Serve the operator UI.
+  Serve {
+    /// Override the configured bind address.
+    #[arg(long)]
+    bind:      Option<SocketAddr>,
+    /// Serve a fixed principal instead of authenticating.
+    ///
+    /// SPEC.md section 14 requires external OIDC. This exists for local
+    /// work and refuses to bind a non-loopback address, so it cannot
+    /// become a deployment by accident.
+    #[arg(long, value_name = "NAME")]
+    dev_actor: Option<String>,
+  },
   /// Row counts across the projections.
   Status,
 }
@@ -214,6 +229,9 @@ async fn main() -> Result<()> {
       );
     }
 
+    Command::Serve { bind, dev_actor } => {
+      serve(cfg, &cli.config, bind, dev_actor).await?;
+    }
     Command::Status => {
       let counts = db.read(|r| r.counts())?;
       println!("entities   {}", counts.entities);
@@ -299,5 +317,67 @@ fn run_checks(
       println!("{id} disabled; its open violations are resolved");
     }
   }
+  Ok(())
+}
+
+/// Start the operator UI.
+///
+/// The database handle is opened again here rather than reusing the one
+/// `main` made, because the server takes ownership of an `Arc` that
+/// outlives this call and the CLI's handle is scoped to a single
+/// command.
+async fn serve(
+  cfg: Config,
+  config_path: &std::path::Path,
+  bind: Option<SocketAddr>,
+  dev_actor: Option<String>,
+) -> Result<()> {
+  let bind = bind.unwrap_or(cfg.server.bind);
+
+  // OIDC wins whenever it is configured: a `--dev-actor` passed by habit
+  // must never quietly downgrade a real deployment to no authentication.
+  let (auth, oidc) = match (&cfg.auth, dev_actor) {
+    (Some(auth), dev) => {
+      if dev.is_some() {
+        tracing::warn!(
+          "--dev-actor was given but [auth] is configured; serving OIDC"
+        );
+      }
+      let oidc_cfg = auth.to_oidc();
+      let client = Oidc::new(oidc_cfg.clone())?;
+      (AuthMode::Oidc(Box::new(oidc_cfg)), Some(client))
+    }
+    (None, Some(actor)) => (AuthMode::Dev { actor }, None),
+    (None, None) => bail!(
+      "no authentication configured: add an [auth] section to {}, or pass \
+       --dev-actor NAME to serve a fixed principal on a loopback address",
+      config_path.display()
+    ),
+  };
+
+  let db = Arc::new(
+    Db::open(&cfg.store.path)
+      .with_context(|| format!("opening {}", cfg.store.path.display()))?,
+  );
+  let sweeps = SweepRunner::new(
+    Arc::clone(&db),
+    Arc::new(registry()),
+    cfg.systems.clone(),
+    cfg.sweep.absence_guard_pct,
+  );
+
+  let state = AppState {
+    db,
+    sweeps,
+    // A loopback dev server is plain HTTP, so a `Secure` cookie would
+    // never come back. Anything with real authentication is expected to
+    // be behind TLS.
+    secure: !matches!(auth, AuthMode::Dev { .. }),
+    auth,
+    oidc,
+    config_path: config_path.display().to_string(),
+  };
+
+  overlord_web::serve(state, bind).await?;
   Ok(())
 }

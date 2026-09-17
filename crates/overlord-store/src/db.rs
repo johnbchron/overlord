@@ -27,8 +27,10 @@ pub struct Db {
   writer:  Mutex<Connection>,
   readers: Mutex<Vec<Connection>>,
   /// Kept open for an in-memory database so the shared-cache database
-  /// outlives any individual connection.
-  _keeper: Option<Connection>,
+  /// outlives any individual connection. Never used, but behind a
+  /// `Mutex` all the same: a bare `Connection` is `Send` and not `Sync`,
+  /// and `Db` is shared across tasks by the web server.
+  _keeper: Mutex<Option<Connection>>,
 }
 
 #[derive(Clone)]
@@ -92,7 +94,7 @@ impl Db {
       source,
       writer: Mutex::new(writer),
       readers: Mutex::new(Vec::new()),
-      _keeper: keeper,
+      _keeper: Mutex::new(keeper),
     })
   }
 
@@ -268,4 +270,19 @@ pub fn get_payload(conn: &Connection, hash: &str) -> Result<String> {
       }
       other => other.into(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  /// The web server shares one [`Db`] across every request task, so this
+  /// is a real requirement rather than a nicety — and it is easy to lose
+  /// by adding a bare `Connection` field, which is `Send` but not
+  /// `Sync`.
+  #[test]
+  fn the_handle_can_be_shared_across_threads() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Db>();
+  }
 }
