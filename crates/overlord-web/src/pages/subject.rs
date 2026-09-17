@@ -4,17 +4,21 @@
 //! has it looked like over time": identities and links, every violation
 //! with its history, and the fact timeline.
 //!
-//! Identity *actions* — confirm, link, unlink, merge, split — are M3.
-//! Pending suggestions are shown here from M2 because the board already
-//! marks subjects ambiguous, and an operator sent here by that flag
-//! needs to see what overlord proposed even before they can act on it.
+//! Identity lives here too, because identity work is always *about* one
+//! account or one person: an unlinked account shows what overlord
+//! proposed and the verbs to act on it, and a person shows unlink, the
+//! primary designation, merge and split. The identity queue at
+//! `/identity` is the same rows gathered across every account, not a
+//! second implementation of them.
+
+use std::collections::BTreeMap;
 
 use axum::{
   extract::{Query, State},
   response::{Html, IntoResponse, Response},
 };
 use maud::{Markup, html};
-use overlord_core::{EntityRef, PersonUid, SubjectRef};
+use overlord_core::{EntityRef, PersonUid, SubjectRef, SystemId, SystemKind};
 use overlord_store::{ViolationFilter, ViolationRow};
 use serde::Deserialize;
 
@@ -23,6 +27,7 @@ use crate::{
   auth::Identity,
   error::{Result, WebError},
   layout::{self, Section},
+  pages::violations::new_key,
   view,
 };
 
@@ -40,10 +45,13 @@ pub async fn person(
 
   let (detail, violations) = state.db.read(|r| -> Result<_> {
     let detail = r.person_detail(&uid)?;
-    let subject = SubjectRef::Person(r.resolve_person(&uid)?);
+    // Their own uid *and* the ones they absorbed: an episode opened
+    // against an unlinked account keeps that account's implicit uid
+    // after a link promotes it, and it is this person's violation now.
+    let subjects = r.person_subject_refs(&uid)?;
     let violations = r.violations_where(&ViolationFilter {
       states: crate::pages::subject::ALL_STATES.to_vec(),
-      subject: Some(subject),
+      subjects,
       limit: 500,
       ..ViolationFilter::default()
     })?;
@@ -63,7 +71,7 @@ pub async fn person(
     let rows = state.db.read(|r| {
       r.violations_where(&ViolationFilter {
         states: ALL_STATES.to_vec(),
-        subject: Some(SubjectRef::Entity(entity.clone())),
+        subjects: vec![SubjectRef::Entity(entity.clone())],
         limit: 500,
         ..ViolationFilter::default()
       })
@@ -74,6 +82,15 @@ pub async fn person(
   let title = detail.display_name.clone().unwrap_or_else(|| {
     view::subject_label(&SubjectRef::Person(detail.person_uid.clone()), None)
   });
+  let back = format!(
+    "/person?uid={}",
+    view::urlencode(detail.person_uid.as_str())
+  );
+  // Which kind each of their accounts belongs to. A primary is
+  // designated per system *kind*, and an entity ref only names its
+  // system, so the page has to look the kind up to offer the verb.
+  let kinds: BTreeMap<SystemId, SystemKind> =
+    state.db.read(|r| r.known_systems())?.into_iter().collect();
 
   let content = html! {
     (layout::head(&title, "", html! {
@@ -106,6 +123,7 @@ pub async fn person(
               th { "Account" }
               th class="shrink" { "System" }
               th class="shrink" { "Primary for" }
+              th class="shrink right" { "" }
             }
           }
           tbody {
@@ -123,6 +141,99 @@ pub async fn person(
                       span class="tag tag-ok" { (kind.as_str()) }
                     }
                   }
+                }
+                td class="shrink right" {
+                  div class="row shrink"
+                      style="gap:0.25rem;justify-content:flex-end" {
+                    // Only offered where it would mean something: a
+                    // primary disambiguates an `entity(...)` selector,
+                    // and there is nothing to disambiguate until the
+                    // person holds two accounts of that kind.
+                    @if let Some(kind) = kinds.get(&e.system)
+                      && !detail.primaries.iter().any(|(k, p)| k == kind && p == e)
+                      && detail.entities.iter()
+                           .filter(|o| kinds.get(&o.system) == Some(kind))
+                           .count() > 1 {
+                      form method="post" action="/identity/primary"
+                           class="inline-form" {
+                        input type="hidden" name="person"
+                              value=(detail.person_uid.as_str());
+                        input type="hidden" name="system_kind"
+                              value=(kind.as_str());
+                        input type="hidden" name="entity"
+                              value=(e.to_string());
+                        input type="hidden" name="back" value=(back);
+                        input type="hidden" name="idempotency_key"
+                              value=(new_key());
+                        button class="linkish"
+                               title="Resolve entity(...) selectors to this \
+                                      account" {
+                          "Make primary"
+                        }
+                      }
+                    }
+                    form method="post" action="/identity/unlink"
+                         class="inline-form" {
+                      input type="hidden" name="person"
+                            value=(detail.person_uid.as_str());
+                      input type="hidden" name="entity" value=(e.to_string());
+                      input type="hidden" name="back" value=(back);
+                      input type="hidden" name="idempotency_key"
+                            value=(new_key());
+                      button class="linkish"
+                             title="Detach: it becomes an unlinked account \
+                                    again, with its own violations" {
+                        "Unlink"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    @if !detail.implicit {
+      h2 { "Identity" }
+      div class="panel" {
+        div class="panel-body stack" {
+          p class="hint" {
+            "Merging keeps this uid and retires the other, which then \
+             resolves through it forever — no violation, acknowledgement \
+             or suppression is rewritten (SPEC.md section 12)."
+          }
+          (crate::pages::identity::picker_form(
+            "merge",
+            detail.person_uid.as_str(),
+            "Merge another person into this one",
+          ))
+
+          @if detail.entities.len() > 1 {
+            form method="post" action="/identity/split" class="stack" {
+              input type="hidden" name="from"
+                    value=(detail.person_uid.as_str());
+              input type="hidden" name="idempotency_key" value=(new_key());
+              p class="hint" {
+                "Splitting moves the chosen accounts to a new person. \
+                 This one keeps its uid, and so its history."
+              }
+              @for e in &detail.entities {
+                label class="row shrink" {
+                  input type="checkbox" name="entity" value=(e.to_string());
+                  span { (e.system.as_str()) " / " (e.entity_key.as_str()) }
+                }
+              }
+              div class="row" {
+                label class="field" style="flex:2" {
+                  span { "Name for the new person" }
+                  input type="text" name="display_name"
+                        placeholder="optional";
+                }
+                div class="field" {
+                  span { "\u{00a0}" }
+                  button class="btn" { "Split off" }
                 }
               }
             }
@@ -172,7 +283,7 @@ pub async fn entity(
         r.entity_facts(&entity, 50)?,
         r.violations_where(&ViolationFilter {
           states: ALL_STATES.to_vec(),
-          subject: Some(SubjectRef::Entity(entity.clone())),
+          subjects: vec![SubjectRef::Entity(entity.clone())],
           limit: 500,
           ..ViolationFilter::default()
         })?,
@@ -189,6 +300,7 @@ pub async fn entity(
     .as_ref()
     .and_then(|n| n.display_name.clone())
     .unwrap_or_else(|| entity.entity_key.to_string());
+  let back = format!("/entity?ref={}", view::urlencode(&entity.to_string()));
 
   let content = html! {
     (layout::head(&title, "", html! {
@@ -223,31 +335,77 @@ pub async fn entity(
       }
     }
 
-    @if !suggestions.is_empty() {
-      h2 { "Suggested links" }
+    @if detail.person.is_none() {
+      h2 { "Identity" }
       p class="lede" {
-        "Machine-proposed and never applied automatically. Confirming them \
-         arrives with identity work."
+        "This account is not linked to a person, so it is evaluated as a \
+         person in its own right. Suggestions are machine-proposed and \
+         never applied automatically (SPEC.md section 12)."
       }
-      div class="panel" {
-        table {
-          thead {
-            tr { th { "Person" } th class="shrink" { "Signal" } th { "Why" } }
-          }
-          tbody {
-            @for (uid, signal, evidence) in &suggestions {
+
+      @if !suggestions.is_empty() {
+        div class="panel" {
+          table {
+            thead {
               tr {
-                td {
-                  a class="ref"
-                    href={ "/person?uid=" (view::urlencode(uid.as_str())) } {
-                    (uid.as_str())
+                th { "Proposed person" }
+                th class="shrink" { "Signal" }
+                th { "Why" }
+                th class="shrink right" { "" }
+              }
+            }
+            tbody {
+              @for s in &suggestions {
+                tr {
+                  td {
+                    (view::subject(
+                      &SubjectRef::Person(s.person_uid.clone()), None
+                    ))
+                    @if s.person_uid.is_implicit() {
+                      div class="muted soft" {
+                        "unlinked; confirming creates a person"
+                      }
+                    }
+                  }
+                  td class="shrink" { span class="tag" { (s.signal) } }
+                  td class="evidence" {
+                    (crate::pages::identity::explain(s))
+                  }
+                  td class="shrink right" {
+                    form method="post" action="/identity/link"
+                         class="inline-form" {
+                      input type="hidden" name="entity"
+                            value=(entity.to_string());
+                      input type="hidden" name="person"
+                            value=(s.person_uid.as_str());
+                      input type="hidden" name="signal" value=(s.signal);
+                      input type="hidden" name="back" value=(back);
+                      input type="hidden" name="idempotency_key"
+                            value=(new_key());
+                      button class="btn" { "Confirm" }
+                    }
                   }
                 }
-                td class="shrink" { span class="tag" { (signal) } }
-                td class="evidence" { (evidence.to_string()) }
               }
             }
           }
+        }
+      }
+
+      div class="panel" {
+        div class="panel-body stack" {
+          @if suggestions.is_empty() {
+            p class="hint" {
+              "overlord proposes nothing for this account: no other \
+               system carries a matching address, directory id, or \
+               username — or more than one account did, which is not an \
+               identification. Link it by hand if you know better."
+            }
+          }
+          (crate::pages::identity::picker_form(
+            "link", &entity.to_string(), "Link to an existing person",
+          ))
+          (crate::pages::identity::new_person_form(&entity))
         }
       }
     }

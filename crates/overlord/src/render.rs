@@ -48,6 +48,18 @@ pub fn sweep(out: &SweepOutcome) {
   if e.expired > 0 {
     println!("  {} suppressions expired", e.expired);
   }
+  if e.suggested > 0 {
+    println!(
+      "  {} link suggestions — nothing was linked; see `overlord suggestions`",
+      e.suggested
+    );
+  }
+  if e.carried > 0 {
+    println!(
+      "  {} violations carried onto the person who absorbed their subject",
+      e.carried
+    );
+  }
   if e.ambiguous > 0 {
     println!(
       "  {} subjects were ambiguous — designate a primary entity",
@@ -206,4 +218,27 @@ pub fn dry_run(run: &overlord_engine::checks::DryRun) {
   if run.match_count > 0 {
     println!("nothing was opened; this was a dry run");
   }
+}
+
+/// Proposed links. Read-only, and it says so: an operator reading this
+/// in a terminal should not have to guess whether anything happened.
+pub fn suggestions(rows: &[overlord_store::Suggestion]) {
+  if rows.is_empty() {
+    println!(
+      "no proposed links (run a sweep; suggestions are recomputed each time)"
+    );
+    return;
+  }
+  for s in rows {
+    let why = match (
+      s.evidence.get("field").and_then(|v| v.as_str()),
+      s.evidence.get("value").and_then(|v| v.as_str()),
+    ) {
+      (Some(field), Some(value)) => format!("{field} = {value}"),
+      _ => s.evidence.to_string(),
+    };
+    println!("  {:<14} {}", s.signal, s.entity);
+    println!("      -> {}  ({why})", s.person_uid);
+  }
+  println!("nothing was linked; suggestions are never applied automatically");
 }

@@ -14,10 +14,10 @@ use clap::{Parser, Subcommand};
 use overlord_connect::Registry;
 use overlord_connector_fixture::FixtureConnector;
 use overlord_core::{
-  Actor, CheckDraft, CheckId, CommandKind, NewCommand, SubjectRef,
-  SuppressReason, SystemId, Timestamp, ViolationState,
+  Actor, CheckDraft, CheckId, CommandKind, EntityRef, NewCommand, PersonUid,
+  SubjectRef, SuppressReason, SystemId, Timestamp, ViolationState,
 };
-use overlord_engine::{SweepPlan, checks, run_sweep};
+use overlord_engine::{SweepPlan, checks, identity, run_sweep};
 use overlord_store::Db;
 use overlord_web::{
   AppState, auth::AuthMode, oidc::Oidc, sweeprun::SweepRunner,
@@ -87,6 +87,40 @@ enum Command {
     /// ISO-8601. Without it the suppression does not expire.
     #[arg(long)]
     until:   Option<String>,
+  },
+
+  /// Show the link suggestions this store's last sweep computed.
+  ///
+  /// Read-only, like the suggestions themselves: nothing here links
+  /// anything (SPEC.md section 12).
+  Suggestions {
+    #[arg(long, default_value = "50")]
+    limit: usize,
+  },
+
+  /// Attach an account to a person.
+  ///
+  /// `person` may be a confirmed uid, the `implicit:<account>` uid of
+  /// another unlinked account — in which case a person is created and
+  /// both accounts are linked to it — or be omitted, which creates a
+  /// person for this account alone.
+  Link {
+    /// `system/entity_type/entity_key`.
+    entity: String,
+    person: Option<String>,
+    /// A display name, when this creates the person.
+    #[arg(long)]
+    name:   Option<String>,
+  },
+
+  /// Detach an account from the person holding it.
+  Unlink { person: String, entity: String },
+
+  /// Combine two persons. `retired` becomes a permanent alias of
+  /// `surviving` and resolves through it forever (SPEC.md section 12).
+  Merge {
+    surviving: String,
+    retired:   String,
   },
 
   /// Drop every projection and replay the streams.
@@ -219,6 +253,64 @@ async fn main() -> Result<()> {
         until,
       })?;
       println!("suppressed");
+    }
+
+    Command::Suggestions { limit } => {
+      let rows = db.read(|r| r.pending_suggestions(limit))?;
+      render::suggestions(&rows);
+    }
+
+    Command::Link {
+      entity,
+      person,
+      name,
+    } => {
+      let entity: EntityRef = entity.parse().context("entity")?;
+      // One key per invocation, as everywhere else on this path, so a
+      // retried script does not link twice (SPEC.md section 6.2).
+      let key = Some(format!("cli:{now}:person.link:{entity}"));
+      let uid = match person {
+        Some(person) => identity::confirm(
+          &db,
+          &actor,
+          &entity,
+          &PersonUid::new(person),
+          None,
+          now,
+          key,
+        )?,
+        None => identity::link_to_new_person(
+          &db, &actor, name, &entity, None, now, key,
+        )?,
+      };
+      println!("{entity} -> {uid}");
+    }
+
+    Command::Unlink { person, entity } => {
+      let entity: EntityRef = entity.parse().context("entity")?;
+      identity::unlink(
+        &db,
+        &actor,
+        &PersonUid::new(person),
+        &entity,
+        now,
+        Some(format!("cli:{now}:person.unlink:{entity}")),
+      )?;
+      println!("unlinked {entity}");
+    }
+
+    Command::Merge { surviving, retired } => {
+      let surviving = PersonUid::new(surviving);
+      let retired = PersonUid::new(retired);
+      identity::merge(
+        &db,
+        &actor,
+        &surviving,
+        &retired,
+        now,
+        Some(format!("cli:{now}:person.merge:{retired}")),
+      )?;
+      println!("{retired} -> {surviving}");
     }
 
     Command::Rebuild => {

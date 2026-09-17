@@ -1,0 +1,60 @@
+{
+  "system_kind": "idp",
+  "entity_type": "user",
+  "stages": [
+    {
+      "note": "the same people, spelled the way a directory spells them",
+      "records": [
+        {
+          "key": "ada@example.com",
+          "name": "Ada Lovelace",
+          "state": "active",
+          "mfa": true,
+          "admin": false,
+          "employee_id": "E-1001",
+          "last_login": "2026-01-14T09:05:00Z",
+          "groups": []
+        },
+        {
+          "key": "ghopper@corp.example.com",
+          "name": "Grace Hopper",
+          "state": "active",
+          "mfa": false,
+          "admin": true,
+          "employee_id": "E-1002",
+          "last_login": "2025-06-01T00:05:00Z",
+          "groups": []
+        },
+        {
+          "key": "alan@corp.example.com",
+          "name": "Alan Turing",
+          "state": "active",
+          "mfa": true,
+          "admin": false,
+          "last_login": "2026-01-02T00:05:00Z",
+          "groups": []
+        },
+        {
+          "key": "sam@corp.example.com",
+          "name": "Sam Altman-Smith",
+          "state": "active",
+          "mfa": true,
+          "admin": false,
+          "username": "sam",
+          "last_login": "2026-01-10T00:05:00Z",
+          "groups": []
+        },
+        {
+          "key": "sam.admin@corp.example.com",
+          "name": "Sam Altman-Smith (admin)",
+          "state": "active",
+          "mfa": true,
+          "admin": true,
+          "username": "sam",
+          "last_login": "2026-01-10T00:06:00Z",
+          "groups": []
+        }
+      ]
+    }
+  ]
+}

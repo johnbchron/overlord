@@ -4,7 +4,7 @@ Working log for the build described in [PLAN.md](PLAN.md). Updated as work
 lands, not in advance. Spec references like (§7) point at
 [SPEC.md](SPEC.md); plan references at PLAN.md.
 
-**Current milestone:** M2 — Operator UI. **Complete.**
+**Current milestone:** M3 — Identity. **Complete.**
 
 ---
 
@@ -34,14 +34,21 @@ lands, not in advance. Spec references like (§7) point at
 | 17 | Sweep from the UI | done |
 | 18 | OIDC, `--dev-actor` confined to loopback | done |
 
-`cargo test --workspace`: **193 passing, 0 failing.**
-`cargo clippy --workspace --all-targets -- -D warnings`: **clean.**
+| # | M3 task | State |
+| --- | --- | --- |
+| 19 | Suggestion computation, explainable, stored read-only | done |
+| 20 | Confirm / manual link / unlink / primary-per-system-kind | done |
+| 21 | Merge with permanent alias, split with recorded provenance | done |
+| 22 | Promotion of implicit persons, carrying violation history | done |
+| 23 | `suppress_if_pending_links` honoured during evaluation | done |
 
-M3 (identity), M4 (real connectors), M5 (lifecycle polish) are untouched.
-`suggestion` is still a table with no writer — M3 fills it, and
-`suppress_if_pending_links` is implemented against it and therefore inert
-until then. The entity detail page renders pending suggestions already,
-so that screen needs no further work when M3 starts producing them.
+`cargo test --workspace`: **223 passing, 0 failing.**
+`cargo clippy --workspace --all-targets -- -D warnings`: **clean.**
+`cargo fmt --all -- --check`: **clean.**
+
+M4 (real connectors) and M5 (lifecycle polish) are untouched. Every
+connector so far is the fixture one, so nothing in the tree has yet met a
+vendor's idea of an identifier.
 
 ### Try it
 
@@ -52,66 +59,84 @@ cargo run -- -c examples/fixture.toml checks import examples/starter-checks.json
 cargo run -- -c examples/fixture.toml checks dry-run mfa-missing
 cargo run -- -c examples/fixture.toml checks enable mfa-missing
 cargo run -- -c examples/fixture.toml sweep
+cargo run -- -c examples/fixture.toml suggestions
 cargo run -- -c examples/fixture.toml serve --dev-actor you
 ```
 
-Then http://127.0.0.1:8080. `--dev-actor` authenticates nobody and
-refuses to bind anything but a loopback address.
+Then http://127.0.0.1:8080, and the **Identity** tab. `--dev-actor`
+authenticates nobody and refuses to bind anything but a loopback address.
+
+For the identity signals in isolation, point a `[[systems]]` pair at
+`fixtures/identity-ws.json` and `fixtures/identity-idp.json`: one person
+found per signal, and one deliberately found by none. `fixtures/README.md`
+has the cast.
 
 ---
 
-## Starting M3 — handoff
+## Starting M4 — handoff
 
-Written at the end of M2. PLAN.md §4 lists the M3 tasks (identity:
-suggestions, confirm/link/unlink/primary, merge and split, promotion of
-implicit persons, `suppress_if_pending_links`). This is what the code
-actually leaves you.
+Written at the end of M3. PLAN.md §4 lists the M4 tasks: the Google
+Workspace connector first (so the overlay vocabulary is shaped by
+workspace semantics), then an IdP, then access/SSO and MDM, with
+per-connector normalization rulesets authored as commands. This is what
+the code actually leaves you.
 
-### What M2 added that M3 builds on
+### What M3 added that M4 has to feed
 
-`crates/overlord-web` is nine page modules plus `actions.rs`, all
-server-rendered maud over axum, with htmx for fragment swaps. There is
-no JSON API and no client-side model: a screen is a function from the
-projections to markup, and a fragment handler renders exactly the markup
-the full page would have produced for that region, by calling into the
-same function. Keep that property — it is why a filtered board and a
-re-rendered single row cannot disagree about how a violation looks.
+Identity now runs off the **normalized overlay**, which means a real
+connector's normalization ruleset is no longer only about checks — it
+decides whether overlord can match a person across systems at all. The
+signals `overlord-engine/src/identity.rs` looks for, strongest first:
 
-The identity screens M3 needs are **already rendering, read-only**:
+| signal | overlay fields, in order | fallback |
+| --- | --- | --- |
+| `exact-email` | `email`, `primary_email` | the entity key, if email-shaped |
+| `directory-id` | `employee_id`, `external_id`, `directory_id` | none |
+| `username` | `username`, `user_name`, `login` | the local part of an email-shaped key |
 
-- `pages/subject.rs::person` shows a person's accounts, their designated
-  primaries per system kind, their own violations and their accounts'
-  violations, and says plainly when the person is implicit.
-- `pages/subject.rs::entity` shows pending suggestions from the
-  `suggestion` table with their signal and evidence. Nothing writes that
-  table yet, so the section is invisible in practice; the moment M3's
-  suggestion computation lands it appears with no view work.
+**A connector that maps none of these can only be matched by its key.**
+So when the Workspace ruleset lands, map `primaryEmail` to `email` and
+`externalIds` to `employee_id` even though no check needs them: identity
+does. The same goes for Okta (`profile.login`, `profile.employeeNumber`)
+and Entra (`userPrincipalName`, `employeeId`, `onPremisesImmutableId`).
+Adding a field to a ruleset is a `normalization.upsert` revision, so this
+is correctable later — but a tenant whose first sweep proposes nothing
+will conclude the feature does not work.
 
-So M3's UI work is mostly **adding the verbs**: a confirm button on each
-suggestion, a manual link form, unlink, set-primary, merge and split.
-`actions.rs` is the pattern to follow — every handler there takes an
-`Identity`, appends one `NewCommand` with a form-supplied idempotency
-key, and returns either a re-rendered fragment or a redirect.
+### The identity surface, in one paragraph each
 
-### Read models: what exists now
+- **`overlord-engine/src/identity.rs`** is the whole of it: the
+  suggestion computation, and the operator verbs (`confirm`, `link`,
+  `link_to_new_person`, `unlink`, `set_primary`, `merge`, `split`). The
+  two halves never touch — a suggestion emits no command.
+- **`overlord-store/src/identity.rs`** owns the `suggestion` projection:
+  `replace_suggestions` (wholesale, each sweep) and
+  `pending_suggestions` (the queue, mirrors folded).
+- **`overlord-web/src/pages/identity.rs`** is the queue screen and the
+  person picker; `pages/subject.rs` carries the same verbs where they
+  belong, on one account or one person. `actions.rs` has the handlers.
+- **CLI:** `suggestions`, `link`, `unlink`, `merge`, which is what §5
+  asks for.
 
-`overlord_store::Reader` gained `crates/overlord-store/src/detail.rs` in
-M2, alongside the evaluation-facing models in `read.rs`. New and useful
-to M3:
+### Read models worth knowing
 
-- `person_detail(uid)` — resolves merge aliases first, and handles an
-  implicit uid by deriving everything from the entity behind it
-- `entity_detail(entity)` — includes absent entities, unlike
-  `entity_states`
-- `suggestions_for(entity)` — reads the table M3 will start writing
+`overlord_store::Reader`, across `read.rs` and `detail.rs`:
+
+- `resolve_person(uid)` — **the one that matters.** Follows a uid to the
+  person it means today, through a merge alias *and* through a link that
+  promoted an implicit uid. Anything that looks up a person goes through
+  it.
+- `retired_uids(uid)` / `person_subject_refs(uid)` — the uids a person
+  has absorbed, and the subject refs their violations may be filed under
+- `person_detail(uid)`, `entity_detail(entity)`, `suggestions_for(entity)`
 - `search_subjects(query, limit)` — persons and entities by name or key
 - `violation_episodes(check, subject)` — every episode with its events
 - `sweeps`, `sweep`, `coverage`, `systems`, `check_revisions`, `dryrun`
 
 `ViolationFilter` (in `read.rs`) is how the board narrows: states,
-severities, systems, checks, an exact subject, and a case-folded subject
-substring, all applied in SQL so `limit` keeps meaning "the worst N that
-match".
+severities, systems, checks, a set of exact subjects, and a case-folded
+subject substring, all applied in SQL so `limit` keeps meaning "the worst
+N that match".
 
 ### Traps, carried forward and new
 
@@ -121,32 +146,68 @@ never goes in a URL path segment; `view::subject_href` puts it in a
 query parameter and `view::urlencode` encodes it. Every command needs an
 `Actor` and an idempotency key.
 
-**New: `Db` must stay `Send + Sync`.** The web server shares one handle
+**`Db` must stay `Send + Sync`.** The web server shares one handle
 across every request task. M2 found the in-memory keeper connection was a
 bare `Connection` field, which is `Send` but not `Sync`, and moved it
 behind a `Mutex`. `the_handle_can_be_shared_across_threads` in `db.rs`
 asserts it so the next bare connection field fails at test time rather
 than in a handler signature.
 
-**New: a store refusal usually arrives wrapped in an `EngineError`.**
+**A store refusal usually arrives wrapped in an `EngineError`.**
 `WebError::status` originally matched only `WebError::Store(Rejected)`,
 so `checks::enable` refusing a revision with no dry-run — a §7 contract —
 rendered as a blank 500 instead of a 409 with the reason. It now unwraps
 `Engine(Store(_))` as well. Anything new that goes through the engine
 inherits this; anything that bypasses it will need its own arm.
 
-**New: person-scoped violations survive the system facet.** A person
+**Person-scoped violations survive the system facet.** A person
 spans systems, so filtering the board to one system keeps them rather
 than excluding them — excluding them would hide exactly the
 cross-system findings the filter is being used to investigate. Asserted
 by `a_person_scoped_violation_survives_the_system_facet`.
 
-**New: the dry-run gate is enforced twice, deliberately.** The editor
+**The dry-run gate is enforced twice, deliberately.** The editor
 hides the Enable button without a dry-run for the revision on screen, and
 the store refuses the command regardless. Do not "simplify" this to one:
 a gate that exists only in a template is not a gate, and
 `enabling_is_refused_without_a_dry_run_for_that_revision` posts straight
 past the template to prove it.
+
+**New: a violation's `subject_ref` is not always its subject's ref.** An
+episode keeps the ref it opened under, forever. Link the account behind
+`implicit:ws/user/ada@…` to a person and that episode is *that person's*
+now, still filed under the implicit uid — §12 resolves history through a
+retired uid rather than rewriting it. Two consequences, and both have
+bitten already:
+
+- anything asking "what is wrong with this person" must use
+  `person_subject_refs(uid)`, not `SubjectRef::Person(uid)`, or it
+  silently under-reports;
+- `resolve_person` is the only correct way from a uid to a person, and
+  `recompute_scores` re-implements exactly its two steps in SQL. If one
+  changes, the other has to.
+
+**New: `SubjectRef` serializes as its canonical string, and must.** It
+was a derived internally tagged enum, which cannot wrap a transparent
+newtype — so `CommandKind` carrying a person subject failed at
+serialization, and acknowledging an orphan-account violation was
+impossible. Nothing caught it because every test acknowledged an entity.
+The `Deserialize` impl still accepts the old tagged map so a store
+written before the fix replays;
+`a_stored_command_in_the_old_tagged_shape_still_reads` holds that open.
+
+**New: only an observed account can be linked.** `require_entity` refuses
+a link to an entity with no row in `entity`. Without it a typo in a
+manual link creates a person holding an account no sweep will ever
+produce — invisible on every screen and impossible to unlink from the UI.
+
+**New: scores are recomputed by the command, not by the next sweep.**
+`project_command` calls `recompute_scores` for every person and violation
+verb. Suppressing a finding stops it counting and linking an account
+moves its weight; making the Users screen wait for a sweep to agree would
+make it wrong for however long that is. It lives in `project_command`
+rather than `append_command` because replay calls that one, and the two
+paths must produce identical projections.
 
 ### Smaller things worth knowing
 
@@ -257,7 +318,8 @@ much at real volume), and the spine width. Treat them as provisional.
    get a rule into the system and should probably go. It is still the
    fastest way to seed a demo, and `examples/fixture.toml` documents it
    as such — so it is left in place for M3 rather than removed on the
-   same day the editor landed. The decision is yours.
+   same day the editor landed. The decision is yours. (Still open after
+   M3; it is now the only CLI verb that authors anything.)
 
 4. **Evaluation errors still have no home projection.** A condition that
    fails against a subject is recorded on the standing episode's
@@ -277,6 +339,28 @@ much at real volume), and the spine width. Treat them as provisional.
    server's local zone — which would expire a suppression at an hour
    nobody chose. If operators find that surprising, the fix is a zone
    picker, not a silent conversion.
+
+6. **No check ships with `suppress_if_pending_links` set.** It works —
+   `a_check_can_stay_quiet_about_an_account_with_unreviewed_links` proves
+   it — but `examples/starter-checks.json` leaves it off everywhere,
+   including on `orphan-workspace-account`, which is the rule it was
+   designed for: before linking, every workspace account looks like an
+   orphan. Turning it on would make the first sweep of a new tenant far
+   quieter, at the cost of hiding genuine orphans until somebody works
+   the identity queue. That trade is a policy call, and §12 describes the
+   flag as something a check *may* set, so the starter library does not
+   decide it for you. Set it in the editor if the first board is noise.
+
+7. **Suggestions cross systems only.** Two accounts in the *same* system
+   are never proposed to each other, even when they share an employee id
+   — an admin account alongside an ordinary one is the obvious real case.
+   §12 frames identity as cross-system unification and §6.4 allows a
+   person to hold several accounts of the same type, so the capability is
+   there and only the proposal is missing; it is a one-line change to the
+   grouping in `recompute_suggestions`. Left out because within one
+   system a shared id is at least as likely to be a service account
+   convention as a person, and a wrong suggestion costs more than a
+   missing one. Worth revisiting against a real tenant.
 
 ---
 
@@ -661,3 +745,105 @@ to change: the teal, the critical-row tint at real volume, and the spine
 width.
 
 `cargo test --workspace`: 193 passing, 0 failing.
+
+### 2026-09-17 — M3: identity (tasks 19–23)
+
+`overlord-engine/src/identity.rs` and `overlord-store/src/identity.rs`,
+plus the `/identity` screen, the verbs on both detail pages, and four CLI
+verbs. The schema needed nothing: M1 built `suggestion`, `link`,
+`link_primary` and `person_alias` and M3 finally writes to all four.
+
+**The three signals, and one rule about all of them.** §12 asks for
+conservative and explainable candidates and names exact email, directory
+id attributes, and username conventions. Each is a named lookup across a
+short list of overlay fields, with a narrow fallback to the entity key
+where it is email-shaped — most connectors key users by address, and a
+key that is not an address says nothing about identity.
+
+The conservatism is one rule, stated once: **a signal counts only when it
+names exactly one account on each side.** Two directory accounts sharing
+a username have not identified anybody, which is the same refusal §6.4
+makes for `entity(...)` selectors, applied a step earlier. Requiring it
+in both directions also keeps the proposal symmetric — an operator
+looking at either account sees the same suggestion, or neither does.
+`fixtures/identity-{ws,idp}.json` exist to prove this: one person per
+signal, and Sam, whose two directory accounts both claim `username:
+"sam"` and who is therefore proposed to nobody.
+
+**Suggestions are computed before evaluation, not after.** They are the
+input to `suppress_if_pending_links`, and a check that exists to stay
+quiet about an account overlord has just proposed a link for cannot be a
+sweep behind — the noise it prevents would already be on the board.
+Because it runs inside `evaluate_sweep`, replay reproduces it at each
+sweep's commit position like everything else, and `suggestion` is in the
+rebuild's projection list.
+
+**The queue folds mirrors; the table does not.** A match between two
+unlinked accounts is stored from both sides, because each account's
+detail page has to show it. As a queue that is two rows for one decision,
+and confirming either resolves both — so `pending_suggestions` keeps one
+row per pair, preferring the higher-scoring account's. The stored set
+stays symmetric.
+
+**Promotion is derived, not recorded.** §6.4 promotes an implicit
+singleton person on its first confirmed link, and the obvious
+implementation is to write a `person_alias` row. It is also wrong: an
+`unlink` would then have to remember to delete it, and a `split` to
+repoint it. An implicit uid *names its entity*, so the `link` table
+already says what it became. `resolve_person` now resolves an implicit
+uid through `link` and a retired uid through `person_alias`, in that
+order, and there is no cleanup anywhere to forget. `recompute_scores`
+does the same two steps in SQL, which is the whole of why the total is
+invariant: every violation is named by a uid first and resolved second,
+so it lands on exactly one person and linking can only move weight
+between rows.
+
+**Carrying an episode was the hard part.** "Promoted … carrying their
+violation history with them" cannot mean rewriting the episode onto the
+new uid — §12 is explicit that history resolves *through* a retired uid
+rather than being edited, and two episodes for one check would collide.
+So evaluation now asks for standing episodes across a subject's own ref
+*and* the refs it has absorbed, continues the oldest ("ignored longest"
+is the board's tiebreak, and it holds the acknowledgement), and resolves
+the rest with a new `ResolveReason::Merged`. Without the last part a
+promotion would leave two standing episodes describing one person and
+score them both. The same machinery fixes merge, which had the same hole:
+before this, merging two people silently dropped the acknowledgement on
+the retired one's violations at the next sweep.
+
+**Two bugs found by building on M2.**
+
+- `SubjectRef` derived `#[serde(tag = "kind")]`, which cannot wrap a
+  transparent newtype — so any command carrying a *person* subject failed
+  at serialization. Acknowledging an orphan-account violation, the most
+  obvious thing to do with a person-scoped check, was impossible. Every
+  existing test acknowledged an entity, so nothing caught it. It now
+  serializes as its canonical string, which is also what the
+  `subject_ref` column and every URL already hold; the old tagged shape
+  still deserializes so a store written before the fix replays.
+- Scores were only recomputed at sweep time, so suppressing a violation
+  or linking an account left the Users screen wrong until the next run.
+  `project_command` now recomputes for every person and violation verb.
+
+**What the store refuses, and why each one.** Linking to an implicit uid
+(that is an account, not a person — create a person and link both);
+linking an account overlord has never observed (a typo would otherwise
+create an invisible person); unlinking an account somebody else now holds
+(a stale form must not detach it); merging a person into itself, or
+merging an unlinked account (promotion is what linking does); splitting
+off an account the person does not hold; designating a primary for an
+account they do not hold — the selector it exists to disambiguate would
+never find it.
+
+**The UI.** `/identity` is a queue, not a graph: one account, one
+proposed person, one signal, one Confirm. Confirming a proposal that
+names an unlinked account creates the person and links both — the button
+says "confirm" either way, and the row says what will happen. The same
+verbs appear where they belong on the detail pages, and a person picker
+serves both manual link and merge because only the button differs. A
+suggestion is resolved before it is acted on, so confirming the second of
+three stale proposals joins the person the first created instead of
+minting a rival.
+
+`cargo test --workspace`: 223 passing. `clippy -D warnings` and
+`fmt --check`: clean.

@@ -10,6 +10,7 @@
 pub mod db;
 pub mod detail;
 pub mod error;
+pub mod identity;
 pub mod project;
 pub mod read;
 pub mod rebuild;
@@ -22,6 +23,7 @@ pub use detail::{
   FactRowSummary, PersonDetail, SubjectHit, SweepRow, SystemRow,
 };
 pub use error::{Result, StoreError};
+pub use identity::Suggestion;
 pub use read::{Counts, EntityState, ScoreRow, ViolationFilter, ViolationRow};
 pub use streams::{
   FactRow, NewFact, SweepStart, SweepStatus, SweepSummary, SystemOutcome,

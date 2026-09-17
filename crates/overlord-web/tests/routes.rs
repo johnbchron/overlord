@@ -190,13 +190,15 @@ async fn page(state: &AppState, uri: &str) -> String {
 #[tokio::test]
 async fn every_screen_is_reachable() {
   let state = seeded().await;
-  // SPEC.md section 5 lists seven screens. Each one is asserted by
+  // SPEC.md section 5 lists seven screens, plus the identity queue
+  // section 12 needs. Each one is asserted by
   // something only that screen renders, so a route that silently falls
   // through to another page fails here.
   for (uri, marker) in [
     ("/", "New since the last sweep"),
     ("/rules", "Checks are the only detection mechanism"),
     ("/users", "Ranked by the sum of weights"),
+    ("/identity", "Proposed links, computed fresh each sweep"),
     ("/sweeps", "the definition of"),
     ("/systems", "overlord never writes to any of them"),
     ("/settings", "What this process loaded"),
@@ -589,6 +591,207 @@ async fn the_coverage_view_shows_what_each_system_reported() {
     "whether a snapshot was a full enumeration decides whether absences may \
      become tombstones"
   );
+}
+
+// --- identity (SPEC.md section 12) --------------------------------------
+
+/// Ada holds an account in both fixtures under the same address, so the
+/// queue proposes exactly one link for her in each direction.
+const ADA_WS: &str = "gws-prod/user/ada@example.com";
+const ADA_IDP: &str = "okta-prod/user/ada@example.com";
+
+#[tokio::test]
+async fn the_queue_shows_a_proposal_with_the_signal_that_found_it() {
+  let state = seeded().await;
+  let html = page(&state, "/identity").await;
+  assert!(html.contains("exact-email"), "{html}");
+  assert!(html.contains("ada@example.com"), "{html}");
+  assert!(
+    html.contains("unlinked; confirming creates a person"),
+    "a proposal naming an unlinked account must say what confirming does"
+  );
+}
+
+#[tokio::test]
+async fn confirming_from_the_queue_creates_the_person_and_links_both() {
+  let state = seeded().await;
+
+  let response = post(
+    &state,
+    "/identity/link",
+    &format!(
+      "entity={}&person={}&signal=exact-email&back=%2Fidentity&\
+       idempotency_key=k1",
+      urlencoding(ADA_WS),
+      urlencoding(&format!("implicit:{ADA_IDP}")),
+    ),
+  )
+  .await;
+  assert!(
+    response.status().is_redirection(),
+    "{:?}",
+    response.status()
+  );
+
+  // One person, holding both accounts. The operator clicked once.
+  let links = state.db.read(|r| r.links()).unwrap();
+  assert_eq!(links.len(), 2, "{links:?}");
+  let uid = links[0].1.clone();
+  assert!(links.iter().all(|(_, p)| *p == uid), "{links:?}");
+
+  let html = page(
+    &state,
+    &format!("/person?uid={}", urlencoding(uid.as_str())),
+  )
+  .await;
+  assert!(html.contains("gws-prod"), "{html}");
+  assert!(html.contains("okta-prod"), "{html}");
+
+  // And the proposal is gone: a linked account has had the operator's
+  // attention already.
+  let queue = page(&state, "/identity").await;
+  assert!(!queue.contains("ada@example.com"), "{queue}");
+}
+
+#[tokio::test]
+async fn a_promoted_person_still_shows_the_violation_they_arrived_with() {
+  let state = seeded().await;
+
+  // `workspace-without-idp` is person-scoped, so before linking it is
+  // open against Ada's *workspace* account as an implicit person.
+  let implicit = format!("person/implicit:{ADA_WS}");
+  let opened = state
+    .db
+    .read(|r| r.violations(&[overlord_core::ViolationState::Open], 500))
+    .unwrap();
+  assert!(
+    opened.iter().any(|v| v.subject.to_string() == implicit),
+    "{opened:?}"
+  );
+
+  post(
+    &state,
+    "/identity/link",
+    &format!(
+      "entity={}&person={}&idempotency_key=k1",
+      urlencoding(ADA_WS),
+      urlencoding(&format!("implicit:{ADA_IDP}")),
+    ),
+  )
+  .await;
+
+  let uid = state.db.read(|r| r.links()).unwrap()[0].1.clone();
+  let html = page(
+    &state,
+    &format!("/person?uid={}", urlencoding(uid.as_str())),
+  )
+  .await;
+  assert!(
+    html.contains("Workspace account with no IdP account"),
+    "an episode filed against the implicit uid is this person's now: {html}"
+  );
+}
+
+#[tokio::test]
+async fn the_picker_offers_an_unlinked_account_as_somebody_to_link_to() {
+  let state = seeded().await;
+  let html = page(
+    &state,
+    &format!(
+      "/identity/candidates?mode=link&q=ada&anchor={}",
+      urlencoding(ADA_WS)
+    ),
+  )
+  .await;
+  assert!(html.contains("Link"), "{html}");
+  assert!(html.contains(&urlencoding(ADA_WS)), "{html}");
+}
+
+#[tokio::test]
+async fn the_merge_picker_leaves_out_unlinked_accounts() {
+  let state = seeded().await;
+  // Nothing is linked, so every hit is an unlinked account — and a
+  // merge joins two confirmed persons (SPEC.md section 12). The list is
+  // empty rather than full of buttons that would be refused.
+  let html = page(
+    &state,
+    "/identity/candidates?mode=merge&q=ada&anchor=whoever",
+  )
+  .await;
+  assert!(!html.contains("Merge into this person"), "{html}");
+}
+
+#[tokio::test]
+async fn unlinking_returns_the_account_to_being_its_own_person() {
+  let state = seeded().await;
+  post(
+    &state,
+    "/identity/link",
+    &format!("entity={}&idempotency_key=k1", urlencoding(ADA_WS)),
+  )
+  .await;
+  let uid = state.db.read(|r| r.links()).unwrap()[0].1.clone();
+
+  let response = post(
+    &state,
+    "/identity/unlink",
+    &format!(
+      "person={}&entity={}&idempotency_key=k2",
+      urlencoding(uid.as_str()),
+      urlencoding(ADA_WS),
+    ),
+  )
+  .await;
+  assert!(response.status().is_redirection());
+  assert!(state.db.read(|r| r.links()).unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_designation_is_refused_for_an_account_the_person_does_not_hold() {
+  let state = seeded().await;
+  post(
+    &state,
+    "/identity/link",
+    &format!("entity={}&idempotency_key=k1", urlencoding(ADA_WS)),
+  )
+  .await;
+  let uid = state.db.read(|r| r.links()).unwrap()[0].1.clone();
+
+  // The store refuses it, and the refusal arrives as a 409 with the
+  // reason rather than a blank 500 — the same contract the check editor
+  // relies on.
+  let response = post(
+    &state,
+    "/identity/primary",
+    &format!(
+      "person={}&system_kind=idp&entity={}&idempotency_key=k2",
+      urlencoding(uid.as_str()),
+      urlencoding(ADA_IDP),
+    ),
+  )
+  .await;
+  assert_eq!(response.status(), StatusCode::CONFLICT);
+  assert!(body(response).await.contains("not linked"));
+}
+
+#[tokio::test]
+async fn an_off_site_return_address_is_not_followed() {
+  let state = seeded().await;
+  let response = post(
+    &state,
+    "/identity/link",
+    &format!(
+      "entity={}&back=https%3A%2F%2Felsewhere.invalid%2F&idempotency_key=k1",
+      urlencoding(ADA_WS)
+    ),
+  )
+  .await;
+  let location = response
+    .headers()
+    .get(header::LOCATION)
+    .map(|v| v.to_str().unwrap().to_owned())
+    .unwrap_or_default();
+  assert!(location.starts_with("/person?uid="), "{location}");
 }
 
 // --- errors and auth ----------------------------------------------------

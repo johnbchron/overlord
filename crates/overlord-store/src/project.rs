@@ -98,6 +98,43 @@ impl Writer<'_> {
     at: Timestamp,
     kind: &CommandKind,
   ) -> Result<()> {
+    self.apply_command(id, at, kind)?;
+
+    // Scores are derived from which violations count and whom they are
+    // attributed to, and both of those move under an operator's hand:
+    // suppressing a finding stops it counting, and linking an account
+    // moves its weight onto the person. Recomputing here rather than at
+    // the next sweep is what keeps the Users screen honest the moment
+    // the operator acts — the same reason `check.disable` resolves its
+    // violations immediately instead of waiting.
+    //
+    // It lives in `project_command` rather than in `append_command`
+    // because replay calls this one, and the two paths must produce
+    // identical projections.
+    if matches!(
+      kind,
+      CommandKind::PersonCreate { .. }
+        | CommandKind::PersonLink { .. }
+        | CommandKind::PersonUnlink { .. }
+        | CommandKind::PersonMerge { .. }
+        | CommandKind::PersonSplit { .. }
+        | CommandKind::ViolationAcknowledge { .. }
+        | CommandKind::ViolationSuppress { .. }
+        | CommandKind::ViolationFalsePositive { .. }
+        | CommandKind::ViolationRevoke { .. }
+        | CommandKind::CheckDisable { .. }
+    ) {
+      self.recompute_scores()?;
+    }
+    Ok(())
+  }
+
+  fn apply_command(
+    &self,
+    id: i64,
+    at: Timestamp,
+    kind: &CommandKind,
+  ) -> Result<()> {
     match kind {
       CommandKind::PersonCreate {
         person_uid,
@@ -107,6 +144,17 @@ impl Writer<'_> {
       CommandKind::PersonLink {
         person_uid, entity, ..
       } => {
+        // An implicit uid names an entity, not a person: it has no row
+        // in `person` and nothing may be linked to it. Two unlinked
+        // accounts are joined by creating a person and linking both,
+        // which is what confirming a suggestion does.
+        if person_uid.is_implicit() {
+          return Err(StoreError::rejected(format!(
+            "{person_uid} is an unlinked account, not a person; create a \
+             person and link both accounts to it"
+          )));
+        }
+        self.require_entity(entity)?;
         // A person the operator links to may not have been created by an
         // explicit command: confirming a suggestion creates it.
         self.upsert_person(person_uid, None, false, id)?;
@@ -128,13 +176,64 @@ impl Writer<'_> {
         Ok(())
       }
 
-      CommandKind::PersonUnlink { entity, .. } => {
+      CommandKind::PersonUnlink { person_uid, entity } => {
+        // Unlinking names the person as well as the account, so a form
+        // rendered before someone else moved the account cannot quietly
+        // detach it from whoever holds it now.
+        let holder: Option<String> = self
+          .conn()
+          .query_row(
+            "SELECT person_uid FROM link
+              WHERE system = ?1 AND entity_type = ?2 AND entity_key = ?3",
+            params![
+              entity.system.as_str(),
+              entity.entity_type.as_str(),
+              entity.entity_key.as_str(),
+            ],
+            |r| r.get(0),
+          )
+          .optional()?;
+        match holder {
+          None => {
+            return Err(StoreError::not_found(format!(
+              "{entity} is not linked to anyone"
+            )));
+          }
+          Some(held) if held != person_uid.as_str() => {
+            return Err(StoreError::rejected(format!(
+              "{entity} is linked to {held}, not to {person_uid}"
+            )));
+          }
+          Some(_) => {}
+        }
         self.delete_link(entity)?;
         Ok(())
       }
 
       CommandKind::PersonMerge { surviving, retired } => {
+        if surviving == retired {
+          return Err(StoreError::rejected(format!(
+            "{surviving} cannot be merged into itself"
+          )));
+        }
+        if surviving.is_implicit() || retired.is_implicit() {
+          return Err(StoreError::rejected(
+            "an unlinked account is promoted by linking it, not by merging \
+             it; merge joins two confirmed persons"
+              .to_owned(),
+          ));
+        }
         self.upsert_person(surviving, None, false, id)?;
+        // A person may designate one primary per system kind, so the two
+        // sides can disagree. The survivor's designation is the one that
+        // survives; the retired one is dropped rather than replacing it.
+        self.conn().execute(
+          "DELETE FROM link_primary
+            WHERE person_uid = ?1
+              AND system_kind IN (
+                SELECT system_kind FROM link_primary WHERE person_uid = ?2)",
+          params![retired.as_str(), surviving.as_str()],
+        )?;
         // The retired uid becomes a permanent alias. Prior violations,
         // acknowledgements and suppressions keep pointing at it and
         // resolve through the alias, rather than being rewritten
@@ -173,21 +272,56 @@ impl Writer<'_> {
       }
 
       CommandKind::PersonSplit {
-        new_uid, entities, ..
+        from,
+        new_uid,
+        entities,
       } => {
+        if entities.is_empty() {
+          return Err(StoreError::rejected(
+            "a split needs at least one account to move".to_owned(),
+          ));
+        }
+        if new_uid.is_implicit() || new_uid == from {
+          return Err(StoreError::rejected(format!(
+            "{new_uid} is not a usable uid for the departing accounts"
+          )));
+        }
         // The original keeps the history; the new uid is traceable to
         // the command that created it.
         self.upsert_person(new_uid, None, false, id)?;
         for entity in entities {
-          self.conn().execute(
+          let moved = self.conn().execute(
             "UPDATE link SET person_uid = ?4, command_id = ?5
-               WHERE system = ?1 AND entity_type = ?2 AND entity_key = ?3",
+               WHERE system = ?1 AND entity_type = ?2 AND entity_key = ?3
+                 AND person_uid = ?6",
             params![
               entity.system.as_str(),
               entity.entity_type.as_str(),
               entity.entity_key.as_str(),
               new_uid.as_str(),
               id,
+              from.as_str(),
+            ],
+          )?;
+          if moved == 0 {
+            return Err(StoreError::rejected(format!(
+              "{entity} is not linked to {from}, so a split cannot move it"
+            )));
+          }
+          // A designation follows its account: leaving it behind would
+          // make the original person primary for an account it no
+          // longer holds.
+          self.conn().execute(
+            "UPDATE link_primary SET person_uid = ?4, command_id = ?5
+               WHERE system = ?1 AND entity_type = ?2 AND entity_key = ?3
+                 AND person_uid = ?6",
+            params![
+              entity.system.as_str(),
+              entity.entity_type.as_str(),
+              entity.entity_key.as_str(),
+              new_uid.as_str(),
+              id,
+              from.as_str(),
             ],
           )?;
         }
@@ -199,6 +333,29 @@ impl Writer<'_> {
         system_kind,
         entity,
       } => {
+        // A primary is a choice between the accounts a person actually
+        // holds (SPEC.md section 6.4), so designating one they do not
+        // hold is refused rather than silently recorded — the selector
+        // it exists to disambiguate would never find it.
+        let held: Option<String> = self
+          .conn()
+          .query_row(
+            "SELECT person_uid FROM link
+              WHERE system = ?1 AND entity_type = ?2 AND entity_key = ?3",
+            params![
+              entity.system.as_str(),
+              entity.entity_type.as_str(),
+              entity.entity_key.as_str(),
+            ],
+            |r| r.get(0),
+          )
+          .optional()?;
+        if held.as_deref() != Some(person_uid.as_str()) {
+          return Err(StoreError::rejected(format!(
+            "{entity} is not linked to {person_uid}, so it cannot be their \
+             primary {system_kind} account"
+          )));
+        }
         self.conn().execute(
           "INSERT INTO link_primary (
              person_uid, system_kind, system, entity_type, entity_key,
@@ -425,6 +582,31 @@ impl Writer<'_> {
          implicit = excluded.implicit",
       params![uid.as_str(), display_name, i32::from(implicit), cmd],
     )?;
+    Ok(())
+  }
+
+  /// Refuse to link an account overlord has never observed.
+  ///
+  /// A typo in a manual link would otherwise create a link row, and so a
+  /// person, for an entity no sweep will ever produce — invisible on
+  /// every screen and impossible to unlink from the UI.
+  fn require_entity(&self, entity: &EntityRef) -> Result<()> {
+    let known: Option<i64> = self
+      .conn()
+      .query_row(
+        "SELECT 1 FROM entity
+          WHERE system = ?1 AND entity_type = ?2 AND entity_key = ?3",
+        params![
+          entity.system.as_str(),
+          entity.entity_type.as_str(),
+          entity.entity_key.as_str(),
+        ],
+        |r| r.get(0),
+      )
+      .optional()?;
+    if known.is_none() {
+      return Err(StoreError::not_found(format!("account {entity}")));
+    }
     Ok(())
   }
 

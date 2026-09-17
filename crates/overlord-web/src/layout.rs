@@ -16,6 +16,7 @@ pub enum Section {
   Violations,
   Rules,
   Users,
+  Identity,
   Sweeps,
   Systems,
   Settings,
@@ -25,10 +26,14 @@ pub enum Section {
 }
 
 impl Section {
-  const NAV: [(Self, &'static str, &'static str); 6] = [
+  const NAV: [(Self, &'static str, &'static str); 7] = [
     (Self::Violations, "/", "Violations"),
     (Self::Rules, "/rules", "Rules"),
     (Self::Users, "/users", "Users"),
+    // Next to Users deliberately: the identity queue is the work that
+    // turns a list of accounts into a list of people, and it is where an
+    // operator lands after seeing an `ambiguous` flag on the board.
+    (Self::Identity, "/identity", "Identity"),
     (Self::Sweeps, "/sweeps", "Sweeps"),
     (Self::Systems, "/systems", "Systems"),
     (Self::Settings, "/settings", "Settings"),

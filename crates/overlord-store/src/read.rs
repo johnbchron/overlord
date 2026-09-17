@@ -265,8 +265,21 @@ impl Reader<'_> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
   }
 
-  /// Follow a merge chain to the surviving uid. A uid that was never
-  /// retired resolves to itself.
+  /// Follow a uid to the person it means today.
+  ///
+  /// Two things can retire a uid, and both resolve here so that every
+  /// lookup — a score, a detail page, a violation's subject — agrees
+  /// about who a stale reference points at:
+  ///
+  /// - a **merge** records the retired uid in `person_alias` (SPEC.md section
+  ///   12);
+  /// - a **promotion** links the entity behind an implicit singleton person to
+  ///   a confirmed one (SPEC.md section 6.4). That needs no alias row: an
+  ///   implicit uid names its entity, so the `link` table already says who it
+  ///   became, and deriving it means an `unlink` restores the implicit person
+  ///   without any cleanup to forget.
+  ///
+  /// A uid that was never retired resolves to itself.
   ///
   /// # Errors
   /// On a SQLite failure.
@@ -276,6 +289,29 @@ impl Reader<'_> {
     // this terminates in one hop in practice; the bound is belt and
     // braces against a cycle in a damaged store.
     for _ in 0..16 {
+      if let Some(entity) = current.implicit_entity() {
+        let linked: Option<String> = self
+          .conn()
+          .query_row(
+            "SELECT person_uid FROM link
+              WHERE system = ?1 AND entity_type = ?2 AND entity_key = ?3",
+            params![
+              entity.system.as_str(),
+              entity.entity_type.as_str(),
+              entity.entity_key.as_str(),
+            ],
+            |r| r.get(0),
+          )
+          .optional()?;
+        match linked {
+          Some(n) => {
+            current = PersonUid::new(n);
+            continue;
+          }
+          None => return Ok(current),
+        }
+      }
+
       let next: Option<String> = self
         .conn()
         .query_row(
@@ -290,6 +326,78 @@ impl Reader<'_> {
       }
     }
     Ok(current)
+  }
+
+  /// Every uid that resolves to `uid` but is not `uid` itself: the
+  /// implicit singletons its entities were before they were linked, and
+  /// the uids retired into it by merges.
+  ///
+  /// Evaluation needs these to carry a standing episode across a
+  /// promotion or a merge instead of resolving it and opening a fresh
+  /// one — which would drop the operator's acknowledgement and reset
+  /// "ignored longest" on the board.
+  ///
+  /// # Errors
+  /// On a SQLite failure.
+  pub fn retired_uids(&self, uid: &PersonUid) -> Result<Vec<PersonUid>> {
+    // An implicit person has no entities of its own beyond the one it
+    // names, and nothing can have been retired into it.
+    if uid.is_implicit() {
+      return Ok(Vec::new());
+    }
+
+    let mut out = Vec::new();
+    let mut stmt = self.conn().prepare(
+      "SELECT system, entity_type, entity_key FROM link
+        WHERE person_uid = ?1 ORDER BY system, entity_type, entity_key",
+    )?;
+    let rows = stmt.query_map([uid.as_str()], |r| {
+      Ok(EntityRef::new(
+        r.get::<_, String>(0)?,
+        r.get::<_, String>(1)?,
+        r.get::<_, String>(2)?,
+      ))
+    })?;
+    for row in rows {
+      out.push(PersonUid::implicit(&row?));
+    }
+
+    // Merge chains are flattened when they are recorded, so one level
+    // of retirement is the whole set.
+    let mut stmt = self.conn().prepare(
+      "SELECT retired_uid FROM person_alias
+        WHERE surviving_uid = ?1 ORDER BY retired_uid",
+    )?;
+    let rows = stmt.query_map([uid.as_str()], |r| r.get::<_, String>(0))?;
+    for row in rows {
+      out.push(PersonUid::new(row?));
+    }
+    Ok(out)
+  }
+
+  /// Every subject ref a person's own violations may be keyed by: their
+  /// uid, and the uids they have absorbed.
+  ///
+  /// Anything showing "this person's violations" wants this rather than
+  /// a single ref — an episode keeps the ref it opened under, so a
+  /// person who was an unlinked account last week still carries an
+  /// episode filed against that account's implicit uid.
+  ///
+  /// # Errors
+  /// On a SQLite failure.
+  pub fn person_subject_refs(
+    &self,
+    uid: &PersonUid,
+  ) -> Result<Vec<SubjectRef>> {
+    let canonical = self.resolve_person(uid)?;
+    let mut out = vec![SubjectRef::Person(canonical.clone())];
+    out.extend(
+      self
+        .retired_uids(&canonical)?
+        .into_iter()
+        .map(SubjectRef::Person),
+    );
+    Ok(out)
   }
 }
 
@@ -309,7 +417,13 @@ pub struct ViolationFilter {
   /// by this facet.
   pub systems:      Vec<SystemId>,
   pub checks:       Vec<CheckId>,
-  pub subject:      Option<SubjectRef>,
+  /// Exact subject refs. More than one is passed when a subject has
+  /// absorbed another: a person's own episodes plus those still keyed by
+  /// an implicit uid a link promoted, or a uid a merge retired. Those
+  /// rows are never rewritten (SPEC.md section 12), so a detail page
+  /// that asked only for the surviving ref would show a person fewer
+  /// violations than they have.
+  pub subjects:     Vec<SubjectRef>,
   /// A case-folded substring of the subject ref, for the board's search
   /// box. Applied in SQL alongside the other facets so `limit` keeps
   /// meaning "the worst N that match".
@@ -326,7 +440,7 @@ impl Default for ViolationFilter {
       severities:   Vec::new(),
       systems:      Vec::new(),
       checks:       Vec::new(),
-      subject:      None,
+      subjects:     Vec::new(),
       subject_like: None,
       limit:        500,
     }
@@ -419,9 +533,12 @@ impl Reader<'_> {
       clauses.push(format!("v.check_id IN ({c})"));
     }
 
-    if let Some(subject) = &filter.subject {
-      let s = bind(&mut params, subject.to_string());
-      clauses.push(format!("v.subject_ref = {s}"));
+    if !filter.subjects.is_empty() {
+      let s = list(
+        &mut params,
+        filter.subjects.iter().map(ToString::to_string).collect(),
+      );
+      clauses.push(format!("v.subject_ref IN ({s})"));
     }
 
     if let Some(text) = &filter.subject_like

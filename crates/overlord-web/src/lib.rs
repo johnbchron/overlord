@@ -85,6 +85,14 @@ pub fn router(state: AppState) -> Router {
     .route("/users/results", get(pages::users::results))
     .route("/person", get(pages::subject::person))
     .route("/entity", get(pages::subject::entity))
+    // --- identity (SPEC.md section 12) ---------------------------------
+    .route("/identity", get(pages::identity::queue))
+    .route("/identity/candidates", get(pages::identity::picker))
+    .route("/identity/link", post(actions::identity_link))
+    .route("/identity/unlink", post(actions::identity_unlink))
+    .route("/identity/primary", post(actions::identity_primary))
+    .route("/identity/merge", post(actions::identity_merge))
+    .route("/identity/split", post(actions::identity_split))
     // --- sweeps, systems, settings -------------------------------------
     .route("/sweeps", get(pages::sweeps::list))
     .route("/sweeps/run", post(actions::sweep_run))

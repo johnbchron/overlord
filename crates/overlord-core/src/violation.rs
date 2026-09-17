@@ -151,6 +151,10 @@ pub enum ResolveReason {
   SubjectAbsent,
   /// The check no longer scopes this subject after a revision.
   OutOfScope,
+  /// The subject was folded into another person — an implicit singleton
+  /// promoted by its first confirmed link, or a uid retired by a merge —
+  /// and that person's episode now carries the finding (SPEC.md s12).
+  Merged,
 }
 
 /// One entry in a violation's history (SPEC.md section 6.3).

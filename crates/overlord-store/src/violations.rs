@@ -15,9 +15,15 @@ use crate::{db::Writer, error::Result};
 /// The latest episode of one `(check, subject)` violation.
 #[derive(Debug, Clone)]
 pub struct Episode {
+  /// The `subject_ref` the row is keyed by, which is not always the
+  /// subject being evaluated: an episode opened against an implicit
+  /// singleton person keeps its own ref after the entity is linked, and
+  /// is carried rather than rewritten (SPEC.md section 12).
+  pub subject_ref:    String,
   pub episode:        i64,
   pub state:          ViolationState,
   pub revision_open:  u32,
+  pub opened_at:      Timestamp,
   pub suppress_until: Option<Timestamp>,
 }
 
@@ -38,36 +44,63 @@ pub struct EpisodeFacts {
 }
 
 impl Writer<'_> {
-  /// The latest episode, whatever its state.
+  /// Every unresolved episode of `check_id` recorded against any of
+  /// `subject_refs`, oldest first.
+  ///
+  /// More than one ref is passed when the subject has absorbed another:
+  /// an implicit singleton person promoted by its first confirmed link,
+  /// or a uid retired by a merge. Their episodes are keyed by the ref
+  /// they opened under and are never rewritten (SPEC.md section 12), so
+  /// finding them means asking for all of them at once — which is also
+  /// how the evaluator notices that two of them now describe the same
+  /// person and closes the duplicate.
   ///
   /// # Errors
   /// On a SQLite failure or an unreadable stored state.
-  pub fn latest_episode(
+  pub fn standing_episodes_among(
     &self,
     check_id: &str,
-    subject_ref: &str,
-  ) -> Result<Option<Episode>> {
-    let row: Option<(i64, String, u32, Option<String>)> = self
-      .conn()
-      .query_row(
-        "SELECT episode, state, revision_open, suppress_until
-           FROM violation
-          WHERE check_id = ?1 AND subject_ref = ?2
-          ORDER BY episode DESC LIMIT 1",
-        params![check_id, subject_ref],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-      )
-      .optional()?;
-
-    let Some((episode, state, revision_open, until)) = row else {
-      return Ok(None);
-    };
-    Ok(Some(Episode {
-      episode,
-      state: state.parse()?,
-      revision_open,
-      suppress_until: until.as_deref().map(str::parse).transpose()?,
-    }))
+    subject_refs: &[String],
+  ) -> Result<Vec<Episode>> {
+    let mut out = Vec::new();
+    let mut stmt = self.conn().prepare(
+      "SELECT episode, state, revision_open, opened_at, suppress_until
+         FROM violation
+        WHERE check_id = ?1 AND subject_ref = ?2 AND state != 'resolved'
+        ORDER BY episode DESC",
+    )?;
+    for subject_ref in subject_refs {
+      let rows = stmt.query_map(params![check_id, subject_ref], |r| {
+        Ok((
+          r.get::<_, i64>(0)?,
+          r.get::<_, String>(1)?,
+          r.get::<_, u32>(2)?,
+          r.get::<_, String>(3)?,
+          r.get::<_, Option<String>>(4)?,
+        ))
+      })?;
+      for row in rows {
+        let (episode, state, revision_open, opened_at, until) = row?;
+        out.push(Episode {
+          subject_ref: subject_ref.clone(),
+          episode,
+          state: state.parse()?,
+          revision_open,
+          opened_at: opened_at.parse()?,
+          suppress_until: until.as_deref().map(str::parse).transpose()?,
+        });
+      }
+    }
+    // Oldest first: "ignored longest" is the board's tiebreak, and it is
+    // also the right episode to keep when two of them merge.
+    out.sort_by(|a, b| {
+      (a.opened_at, a.episode, &a.subject_ref).cmp(&(
+        b.opened_at,
+        b.episode,
+        &b.subject_ref,
+      ))
+    });
+    Ok(out)
   }
 
   /// Open a new episode.
@@ -139,11 +172,18 @@ impl Writer<'_> {
   /// Refresh a standing episode with this sweep's evidence.
   ///
   /// The state is untouched: only the operator and the resolution rules
-  /// move a violation between states.
+  /// move a violation between states. `subject_ref` is the episode's own
+  /// key rather than the subject being evaluated, because a carried
+  /// episode keeps the ref it opened under.
   ///
   /// # Errors
   /// On a SQLite failure.
-  pub fn touch_episode(&self, episode: i64, f: &EpisodeFacts) -> Result<()> {
+  pub fn touch_episode(
+    &self,
+    subject_ref: &str,
+    episode: i64,
+    f: &EpisodeFacts,
+  ) -> Result<()> {
     self.conn().execute(
       "UPDATE violation
           SET last_seen_sweep = ?4, evidence = ?5, stale = ?6,
@@ -151,7 +191,7 @@ impl Writer<'_> {
         WHERE check_id = ?1 AND subject_ref = ?2 AND episode = ?3",
       params![
         &f.check_id,
-        f.subject.to_string(),
+        subject_ref,
         episode,
         f.sweep.0,
         serde_json::to_string(&f.evidence)?,
@@ -260,36 +300,55 @@ impl Writer<'_> {
   /// happened. A retired uid resolves through its alias for the same
   /// reason.
   ///
+  /// Both stages of attribution matter, and their order is the whole
+  /// trick. Every violation is first named by a *uid*: a person-scoped
+  /// one already is one, and an entity-scoped one becomes the implicit
+  /// singleton of its entity. That uid is then resolved exactly as
+  /// [`crate::Reader::resolve_person`] resolves one — through `link` for
+  /// an implicit uid promoted by a confirmed link, then through
+  /// `person_alias` for one retired by a merge. Attributing first and
+  /// resolving second is what keeps the total invariant: every violation
+  /// lands on exactly one person, so linking can only ever move weight
+  /// between rows.
+  ///
   /// # Errors
   /// On a SQLite failure.
   pub fn recompute_scores(&self) -> Result<()> {
     self.conn().execute("DELETE FROM person_score", [])?;
     self.conn().execute(
+      // Both 'person/' and 'entity/' are seven characters, so substr
+      // from 8 is the ref either way.
       "WITH attributed AS (
          SELECT
            v.weight AS weight,
            v.severity AS severity,
            CASE
              WHEN v.subject_kind = 'person' THEN substr(v.subject_ref, 8)
-             ELSE coalesce(
-               (SELECT l.person_uid FROM link l
-                 WHERE 'entity/' || l.system || '/' || l.entity_type
-                       || '/' || l.entity_key = v.subject_ref),
-               'implicit:' || substr(v.subject_ref, 8))
+             ELSE 'implicit:' || substr(v.subject_ref, 8)
            END AS raw_uid
          FROM violation v
          WHERE v.state IN ('open', 'acknowledged')
        ),
+       promoted AS (
+         SELECT
+           coalesce(l.person_uid, attributed.raw_uid) AS uid,
+           weight,
+           severity
+         FROM attributed
+         LEFT JOIN link l
+           ON 'implicit:' || l.system || '/' || l.entity_type || '/'
+              || l.entity_key = attributed.raw_uid
+       ),
        resolved AS (
          SELECT
-           coalesce(a.surviving_uid, attributed.raw_uid) AS uid,
+           coalesce(a.surviving_uid, promoted.uid) AS uid,
            weight,
            CASE severity
              WHEN 'critical' THEN 0 WHEN 'high' THEN 1
              WHEN 'medium' THEN 2 WHEN 'low' THEN 3 ELSE 4
            END AS rank
-         FROM attributed
-         LEFT JOIN person_alias a ON a.retired_uid = attributed.raw_uid
+         FROM promoted
+         LEFT JOIN person_alias a ON a.retired_uid = promoted.uid
        )
        INSERT INTO person_score (
          person_uid, score, violation_count, worst_severity)

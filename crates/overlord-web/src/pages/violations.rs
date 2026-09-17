@@ -77,7 +77,7 @@ impl BoardQuery {
       } else {
         vec![CheckId::new(self.check.clone())]
       },
-      subject: None,
+      subjects: Vec::new(),
       subject_like: (!self.q.trim().is_empty())
         .then(|| self.q.trim().to_owned()),
       limit: 500,

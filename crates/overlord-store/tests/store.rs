@@ -375,6 +375,13 @@ fn a_merge_keeps_the_retired_uid_resolvable_forever() {
   let (a, b) = (PersonUid::new("A"), PersonUid::new("B"));
   let entity = EntityRef::new("gws-prod", "user", "ada@x.com");
 
+  // Only an observed account can be linked, so the fact comes first.
+  let s = sweep(&db, T0);
+  db.write(|w| {
+    w.append_facts(s, &[user_fact("ada@x.com", EntityStatus::Active, true)])
+  })
+  .unwrap();
+
   db.write(|w| {
     w.append_command(&cmd(
       CommandKind::PersonLink {

@@ -345,13 +345,54 @@ impl FromStr for SubjectKind {
 
 /// What a violation is about: `(check_id, subject_ref)` is the stable
 /// identity that lets overlays persist across sweeps (SPEC.md section 6.5).
-#[derive(
-  Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
-#[serde(tag = "kind", rename_all = "lowercase")]
+///
+/// Serialized as its canonical string form — the same text the store's
+/// `subject_ref` column holds and the same text a URL carries — so there
+/// is one spelling of a subject everywhere. The derived representation
+/// could not express the person case at all: `PersonUid` is transparent
+/// over a string, and an internally tagged enum cannot wrap one, so
+/// acknowledging a person-scoped violation failed at serialization.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SubjectRef {
   Entity(EntityRef),
   Person(PersonUid),
+}
+
+impl Serialize for SubjectRef {
+  fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+    s.collect_str(self)
+  }
+}
+
+impl<'de> Deserialize<'de> for SubjectRef {
+  fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+    /// The canonical form, plus the tagged form the derive used to
+    /// produce. A stored command stream holds the old shape and must
+    /// keep replaying, so it is read as well as the new one.
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Wire {
+      Text(String),
+      Tagged {
+        system:      SystemId,
+        entity_type: EntityType,
+        entity_key:  EntityKey,
+      },
+    }
+
+    match Wire::deserialize(d)? {
+      Wire::Text(s) => s.parse().map_err(serde::de::Error::custom),
+      Wire::Tagged {
+        system,
+        entity_type,
+        entity_key,
+      } => Ok(Self::Entity(EntityRef {
+        system,
+        entity_type,
+        entity_key,
+      })),
+    }
+  }
 }
 
 impl SubjectRef {
@@ -434,6 +475,41 @@ mod tests {
     for s in [entity, person] {
       assert_eq!(SubjectRef::from_str(&s.to_string()).unwrap(), s);
     }
+  }
+
+  #[test]
+  fn subject_ref_serializes_as_its_canonical_string() {
+    // Both arms, because the person arm is the one the derived
+    // representation could not express at all: a command carrying a
+    // person-scoped subject failed at serialization rather than at
+    // review, so acknowledging an orphan-account violation was
+    // impossible. It is stored as the text the `subject_ref` column
+    // holds, which is also the text a URL carries.
+    for s in [
+      SubjectRef::Entity(EntityRef::new("okta", "user", "a@example.com")),
+      SubjectRef::Person(PersonUid::new("01J0ABCD")),
+      SubjectRef::Person(PersonUid::implicit(&EntityRef::new(
+        "gws",
+        "user",
+        "a@example.com",
+      ))),
+    ] {
+      let json = serde_json::to_string(&s).unwrap();
+      assert_eq!(json, format!("\"{s}\""));
+      assert_eq!(serde_json::from_str::<SubjectRef>(&json).unwrap(), s);
+    }
+  }
+
+  #[test]
+  fn a_stored_command_in_the_old_tagged_shape_still_reads() {
+    // The command stream is append-only, so a store written before the
+    // representation changed must keep replaying.
+    let old = r#"{"kind":"entity","system":"okta","entity_type":"user",
+                  "entity_key":"a@example.com"}"#;
+    assert_eq!(
+      serde_json::from_str::<SubjectRef>(old).unwrap(),
+      SubjectRef::Entity(EntityRef::new("okta", "user", "a@example.com"))
+    );
   }
 
   #[test]

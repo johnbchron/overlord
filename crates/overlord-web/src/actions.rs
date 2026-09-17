@@ -13,11 +13,11 @@ use axum::{
   response::{Html, IntoResponse, Redirect, Response},
 };
 use overlord_core::{
-  Actor, CheckDraft, CheckId, CommandKind, EntityType, NewCommand, Severity,
-  SubjectKind, SubjectRef, SuppressReason, SystemId, SystemSelector, Timestamp,
-  ViolationState,
+  Actor, CheckDraft, CheckId, CommandKind, EntityRef, EntityType, NewCommand,
+  PersonUid, Severity, SubjectKind, SubjectRef, SuppressReason, SystemId,
+  SystemKind, SystemSelector, Timestamp, ViolationState,
 };
-use overlord_engine::checks;
+use overlord_engine::{checks, identity};
 use overlord_store::ViolationFilter;
 use serde::Deserialize;
 
@@ -100,7 +100,7 @@ pub async fn violation_action(
   if headers.contains_key("hx-request") {
     let filter = ViolationFilter {
       states: ALL_STATES.to_vec(),
-      subject: Some(subject.clone()),
+      subjects: vec![subject.clone()],
       checks: vec![check.clone()],
       limit: 64,
       ..ViolationFilter::default()
@@ -157,6 +157,240 @@ fn parse_until(raw: &str) -> Result<Option<Timestamp>> {
     .parse::<Timestamp>()
     .map(Some)
     .map_err(|e| WebError::bad_request(format!("suppress until: {e}")))
+}
+
+// --- identity (SPEC.md section 12) --------------------------------------
+
+/// Where to send the operator back to. Every identity verb changes a
+/// page that is *about* the thing being changed, so a redirect back is
+/// the whole response — there is no single row to re-render the way a
+/// violation overlay has.
+fn back_to(back: &str, fallback: &str) -> Response {
+  // Only same-origin paths: `back` arrives in a form field, and an
+  // absolute URL there would turn an authenticated POST into an open
+  // redirect.
+  let target = if back.starts_with('/') && !back.starts_with("//") {
+    back
+  } else {
+    fallback
+  };
+  Redirect::to(target).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LinkForm {
+  pub entity:          String,
+  /// A person uid, the implicit uid of another unlinked account, or
+  /// empty to create a person for this account alone.
+  #[serde(default)]
+  pub person:          String,
+  #[serde(default)]
+  pub display_name:    String,
+  /// Which signal the operator agreed with, when they confirmed a
+  /// proposal rather than searching for somebody.
+  #[serde(default)]
+  pub signal:          String,
+  pub idempotency_key: String,
+  #[serde(default)]
+  pub back:            String,
+}
+
+/// Confirm a suggestion, or link an account by hand. Both are the same
+/// command; only where the person came from differs.
+pub async fn identity_link(
+  identity: Identity,
+  State(state): State<AppState>,
+  Form(form): Form<LinkForm>,
+) -> Result<Response> {
+  let entity: EntityRef = form.entity.parse()?;
+  let name = optional(&form.display_name);
+  let signal = optional(&form.signal);
+  let key = Some(form.idempotency_key.clone());
+  let at = Timestamp::now();
+
+  let uid = match form.person.trim() {
+    "" => {
+      let name = match name {
+        Some(name) => Some(name),
+        None => identity::display_name_of(&state.db, &entity)?,
+      };
+      identity::link_to_new_person(
+        &state.db,
+        &identity.actor,
+        name,
+        &entity,
+        signal,
+        at,
+        key,
+      )?
+    }
+    person => identity::confirm(
+      &state.db,
+      &identity.actor,
+      &entity,
+      &PersonUid::new(person),
+      signal,
+      at,
+      key,
+    )?,
+  };
+
+  tracing::info!(%entity, person = %uid, actor = %identity.actor.as_str(), "account linked");
+  Ok(back_to(
+    &form.back,
+    &format!("/person?uid={}", crate::view::urlencode(uid.as_str())),
+  ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UnlinkForm {
+  pub person:          String,
+  pub entity:          String,
+  pub idempotency_key: String,
+  #[serde(default)]
+  pub back:            String,
+}
+
+/// Detach an account. It becomes an unlinked account again — its own
+/// implicit person, with its own violations (SPEC.md section 6.4).
+pub async fn identity_unlink(
+  identity: Identity,
+  State(state): State<AppState>,
+  Form(form): Form<UnlinkForm>,
+) -> Result<Response> {
+  let entity: EntityRef = form.entity.parse()?;
+  let uid = PersonUid::new(form.person.clone());
+  identity::unlink(
+    &state.db,
+    &identity.actor,
+    &uid,
+    &entity,
+    Timestamp::now(),
+    Some(form.idempotency_key.clone()),
+  )?;
+  Ok(back_to(
+    &form.back,
+    &format!("/person?uid={}", crate::view::urlencode(uid.as_str())),
+  ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PrimaryForm {
+  pub person:          String,
+  pub system_kind:     String,
+  pub entity:          String,
+  pub idempotency_key: String,
+  #[serde(default)]
+  pub back:            String,
+}
+
+/// Designate the account an `entity(...)` selector resolves to for one
+/// system kind — the operator's answer to an `ambiguous` flag.
+pub async fn identity_primary(
+  identity: Identity,
+  State(state): State<AppState>,
+  Form(form): Form<PrimaryForm>,
+) -> Result<Response> {
+  let entity: EntityRef = form.entity.parse()?;
+  let uid = PersonUid::new(form.person.clone());
+  let kind = form
+    .system_kind
+    .parse::<SystemKind>()
+    .map_err(|e| WebError::bad_request(e.to_string()))?;
+  identity::set_primary(
+    &state.db,
+    &identity.actor,
+    &uid,
+    kind,
+    &entity,
+    Timestamp::now(),
+    Some(form.idempotency_key.clone()),
+  )?;
+  Ok(back_to(
+    &form.back,
+    &format!("/person?uid={}", crate::view::urlencode(uid.as_str())),
+  ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MergeForm {
+  pub surviving:       String,
+  pub retired:         String,
+  pub idempotency_key: String,
+  #[serde(default)]
+  pub back:            String,
+}
+
+/// Combine two persons. The uid on the page survives; the one chosen in
+/// the picker is retired into it and resolves through it forever.
+pub async fn identity_merge(
+  identity: Identity,
+  State(state): State<AppState>,
+  Form(form): Form<MergeForm>,
+) -> Result<Response> {
+  let surviving = PersonUid::new(form.surviving.clone());
+  let retired = PersonUid::new(form.retired.clone());
+  identity::merge(
+    &state.db,
+    &identity.actor,
+    &surviving,
+    &retired,
+    Timestamp::now(),
+    Some(form.idempotency_key.clone()),
+  )?;
+  Ok(back_to(
+    &form.back,
+    &format!("/person?uid={}", crate::view::urlencode(surviving.as_str())),
+  ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SplitForm {
+  pub from:            String,
+  /// One checkbox per account to move. A form with none checked sends
+  /// nothing, hence the default.
+  #[serde(default)]
+  pub entity:          Vec<String>,
+  #[serde(default)]
+  pub display_name:    String,
+  pub idempotency_key: String,
+}
+
+/// Move accounts onto a new person. The original keeps its uid, and so
+/// its history (SPEC.md section 12).
+pub async fn identity_split(
+  identity: Identity,
+  State(state): State<AppState>,
+  Form(form): Form<SplitForm>,
+) -> Result<Response> {
+  let from = PersonUid::new(form.from.clone());
+  let entities = form
+    .entity
+    .iter()
+    .map(|e| e.parse::<EntityRef>())
+    .collect::<std::result::Result<Vec<_>, _>>()?;
+  if entities.is_empty() {
+    return Err(WebError::bad_request(
+      "choose at least one account to split off",
+    ));
+  }
+
+  let new_uid = identity::split(
+    &state.db,
+    &identity.actor,
+    &from,
+    optional(&form.display_name),
+    &entities,
+    Timestamp::now(),
+    Some(form.idempotency_key.clone()),
+  )?;
+  Ok(
+    Redirect::to(&format!(
+      "/person?uid={}",
+      crate::view::urlencode(new_uid.as_str())
+    ))
+    .into_response(),
+  )
 }
 
 // --- checks -------------------------------------------------------------

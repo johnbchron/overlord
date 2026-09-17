@@ -751,7 +751,7 @@ impl Reader<'_> {
   pub fn suggestions_for(
     &self,
     entity: &EntityRef,
-  ) -> Result<Vec<(PersonUid, String, serde_json::Value)>> {
+  ) -> Result<Vec<crate::Suggestion>> {
     let mut stmt = self.conn().prepare(
       "SELECT person_uid, signal, evidence FROM suggestion
         WHERE system = ?1 AND entity_type = ?2 AND entity_key = ?3
@@ -774,11 +774,12 @@ impl Reader<'_> {
     let mut out = Vec::new();
     for row in rows {
       let (uid, signal, evidence) = row?;
-      out.push((
-        PersonUid::new(uid),
+      out.push(crate::Suggestion {
+        entity: entity.clone(),
+        person_uid: PersonUid::new(uid),
         signal,
-        serde_json::from_str(&evidence)?,
-      ));
+        evidence: serde_json::from_str(&evidence)?,
+      });
     }
     Ok(out)
   }

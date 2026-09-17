@@ -24,6 +24,13 @@ pub struct EvalReport {
   pub standing:           usize,
   pub expired:            usize,
   pub ambiguous:          usize,
+  /// Episodes carried onto a subject that absorbed theirs — an implicit
+  /// singleton person promoted by a link, or a uid retired by a merge.
+  /// Identity work, visible as such (SPEC.md section 12).
+  pub carried:            usize,
+  /// Link suggestions this sweep computed. Proposals only: nothing here
+  /// was applied (SPEC.md section 12).
+  pub suggested:          usize,
   /// Conditions that would not compile, or that failed against a
   /// subject. Rule-quality signals, not violations.
   pub errors:             Vec<CheckProblem>,
@@ -55,6 +62,14 @@ pub fn evaluate_sweep(w: &Writer<'_>, sweep: SweepId) -> Result<EvalReport> {
     report.expired += 1;
   }
 
+  // 2. Recompute link suggestions before anything is evaluated, not after.
+  //    `suppress_if_pending_links` exists so an account overlord has just
+  //    proposed a link for stays quiet until an operator has looked at it
+  //    (SPEC.md section 12); computing suggestions after evaluation would make
+  //    that a sweep late, and the noise it exists to prevent would have been on
+  //    the board already.
+  report.suggested = crate::identity::recompute_suggestions(w, sweep)?;
+
   let world = World::load(&r)?;
   let swept: BTreeSet<SystemId> = r
     .swept_systems(sweep)?
@@ -65,7 +80,7 @@ pub fn evaluate_sweep(w: &Writer<'_>, sweep: SweepId) -> Result<EvalReport> {
   let pending: BTreeSet<EntityRef> =
     r.entities_with_pending_suggestions()?.into_iter().collect();
 
-  // 2. Compile the pinned revisions, not the current ones.
+  // 3. Compile the pinned revisions, not the current ones.
   let mut checks = Vec::new();
   for (id, revision) in r.sweep_pins(sweep)? {
     let draft = r.check_revision(&id, revision)?;
@@ -122,6 +137,10 @@ pub fn evaluate_sweep(w: &Writer<'_>, sweep: SweepId) -> Result<EvalReport> {
               draft,
               program,
               subject_ref: SubjectRef::Entity(entity.clone()),
+              // An entity ref is the account's own key. It absorbs
+              // nothing and is never retired: linking moves who the
+              // account belongs to, not what it is.
+              absorbed: Vec::new(),
               stale: false,
               now,
               sweep,
@@ -153,6 +172,11 @@ pub fn evaluate_sweep(w: &Writer<'_>, sweep: SweepId) -> Result<EvalReport> {
           let Some(subject) = world.person_subject(&uid) else {
             continue;
           };
+          let absorbed = r
+            .retired_uids(&uid)?
+            .into_iter()
+            .map(|retired| SubjectRef::Person(retired).to_string())
+            .collect();
           apply(
             w,
             &mut report,
@@ -163,6 +187,7 @@ pub fn evaluate_sweep(w: &Writer<'_>, sweep: SweepId) -> Result<EvalReport> {
               draft,
               program,
               subject_ref: SubjectRef::Person(uid.clone()),
+              absorbed,
               stale,
               now,
               sweep,
@@ -176,7 +201,7 @@ pub fn evaluate_sweep(w: &Writer<'_>, sweep: SweepId) -> Result<EvalReport> {
     }
   }
 
-  // 3. Standing episodes this pass did not re-confirm.
+  // 4. Standing episodes this pass did not re-confirm.
   reconcile(w, &mut report, &seen, &world, &swept, &checks, now, sweep)?;
 
   w.recompute_scores()?;
@@ -190,6 +215,11 @@ struct Pass<'a> {
   draft:       &'a CheckDraft,
   program:     &'a Program,
   subject_ref: SubjectRef,
+  /// Subject refs this subject has absorbed: the implicit singleton
+  /// persons of the accounts it now holds, and the uids merged into it.
+  /// Episodes opened under those refs are this subject's episodes now
+  /// (SPEC.md section 12).
+  absorbed:    Vec<String>,
   stale:       bool,
   now:         Timestamp,
   sweep:       SweepId,
@@ -215,7 +245,43 @@ fn apply(
   }
   outcome.evidence.attribute(&pass.fact_ids);
 
-  let existing = w.latest_episode(&check_id, &subject_ref)?;
+  // Everything still standing against this subject, under its own ref or
+  // under one it has absorbed. An episode is never rewritten onto the
+  // surviving ref (SPEC.md section 12 is explicit that history resolves
+  // through a retired uid rather than being edited), so carrying it
+  // means continuing to write to the row where it already lives.
+  let mut refs = Vec::with_capacity(1 + pass.absorbed.len());
+  refs.push(subject_ref.clone());
+  for absorbed in &pass.absorbed {
+    seen.insert((check_id.clone(), absorbed.clone()));
+    refs.push(absorbed.clone());
+  }
+  let mut standing = w.standing_episodes_among(&check_id, &refs)?;
+
+  // Oldest first. Whichever episode has been open longest is the one
+  // that continues: it holds the operator's acknowledgement, and it is
+  // the one the board has been ranking by "ignored longest" (SPEC.md
+  // section 8). The rest described the same person all along and are
+  // closed as merged, which is also what stops a promotion from
+  // double-counting a finding it now holds twice.
+  let carried = (!standing.is_empty()).then(|| standing.remove(0));
+  for extra in &standing {
+    w.resolve_episode(
+      &check_id,
+      &extra.subject_ref,
+      extra.episode,
+      pass.now,
+      ResolveReason::Merged,
+      Some(pass.sweep),
+    )?;
+    report.resolved += 1;
+  }
+  if carried
+    .as_ref()
+    .is_some_and(|e| e.subject_ref != subject_ref)
+  {
+    report.carried += 1;
+  }
 
   let facts = EpisodeFacts {
     check_id:   check_id.clone(),
@@ -233,14 +299,16 @@ fn apply(
 
   match &outcome.outcome {
     // Only `true` opens a violation.
-    Ok(Tri::True) => match &existing {
-      Some(Episode { episode, state, .. })
-        if *state != overlord_core::ViolationState::Resolved =>
-      {
-        w.touch_episode(*episode, &facts)?;
+    Ok(Tri::True) => match &carried {
+      Some(Episode {
+        subject_ref,
+        episode,
+        ..
+      }) => {
+        w.touch_episode(subject_ref, *episode, &facts)?;
         report.standing += 1;
       }
-      _ => {
+      None => {
         let episode = w.open_episode(&facts)?;
         if episode > 1 {
           report.regressed += 1;
@@ -251,12 +319,10 @@ fn apply(
     },
 
     Ok(Tri::False | Tri::Null) => {
-      if let Some(e) = &existing
-        && e.state != overlord_core::ViolationState::Resolved
-      {
+      if let Some(e) = &carried {
         w.resolve_episode(
           &check_id,
-          &subject_ref,
+          &e.subject_ref,
           e.episode,
           pass.now,
           ResolveReason::ConditionCleared,
@@ -275,10 +341,8 @@ fn apply(
         subject:  Some(subject_ref.clone()),
         message:  err.to_string(),
       });
-      if let Some(e) = &existing
-        && e.state != overlord_core::ViolationState::Resolved
-      {
-        w.touch_episode(e.episode, &facts)?;
+      if let Some(e) = &carried {
+        w.touch_episode(&e.subject_ref, e.episode, &facts)?;
         report.standing += 1;
       }
     }
@@ -329,8 +393,13 @@ fn reconcile(
         }
       }
       SubjectRef::Person(uid) => {
-        if world.has_person(uid) {
-          // Still a person, but the check no longer selects it.
+        // Through aliases, so an episode left over from a promoted
+        // implicit person or a retired uid is judged by the person it
+        // means today. The pass above carries those it could; one that
+        // reaches here belongs to somebody real whom the check simply
+        // no longer selects.
+        let resolved = w.reader().resolve_person(uid)?;
+        if world.has_person(&resolved) {
           ResolveReason::OutOfScope
         } else {
           ResolveReason::SubjectAbsent

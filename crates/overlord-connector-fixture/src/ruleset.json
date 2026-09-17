@@ -1,6 +1,6 @@
 {
   "id": "fixture-default",
-  "version": "1",
+  "version": "2",
   "system_kind": "workspace",
   "entity_type": "user",
   "entity_key": { "path": "key" },
@@ -21,6 +21,9 @@
     "last_login_at": { "path": "last_login", "as": "timestamp" },
     "groups": { "path": "groups", "as": "list" },
     "department": { "path": "department", "as": "string" },
-    "external_sharing": { "path": "external_sharing", "as": "boolean" }
+    "external_sharing": { "path": "external_sharing", "as": "boolean" },
+    "email": { "path": "email", "as": "string" },
+    "username": { "path": "username", "as": "string" },
+    "employee_id": { "path": "employee_id", "as": "string" }
   }
 }
