@@ -15,9 +15,9 @@
         ];
       };
 
-      toolchain_fn = p: p.rust-bin.stable.latest.default.override {
+      toolchain_fn = p: p.rust-bin.selectLatestNightlyWith (toolchain: toolchain.default.override {
         extensions = [ "rust-src" "rust-analyzer" ];
-      };
+      });
     in {
       devShells.default = pkgs.devshell.mkShell {
         packages = with pkgs; [ (toolchain_fn pkgs) gcc bacon ];
