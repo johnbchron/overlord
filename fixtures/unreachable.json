@@ -1,0 +1,16 @@
+{
+  "system_kind": "workspace",
+  "entity_type": "user",
+  "stages": [
+    {
+      "note": "healthy",
+      "records": [
+        { "key": "ada@example.com", "state": "active", "mfa": true },
+        { "key": "grace@example.com", "state": "active", "mfa": false }
+      ]
+    },
+    {
+      "fail": "connection refused: the directory API is unreachable"
+    }
+  ]
+}

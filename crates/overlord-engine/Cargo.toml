@@ -1,0 +1,24 @@
+[package]
+name = "overlord-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+overlord-core.workspace = true
+overlord-connect.workspace = true
+overlord-expr.workspace = true
+overlord-store.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+overlord-connector-fixture.workspace = true
+rusqlite.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

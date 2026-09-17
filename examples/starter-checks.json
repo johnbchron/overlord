@@ -1,0 +1,50 @@
+[
+  {
+    "id": "mfa-missing",
+    "name": "Active account without MFA",
+    "rationale": "An active account with no second factor is the single most common way an organisation is breached.",
+    "remediation": "Enrol the account in multi-factor authentication, or deprovision it.",
+    "severity": "critical",
+    "applies_to": "entity",
+    "entity_types": ["user"],
+    "condition": "status == \"active\" and not mfa_enrolled"
+  },
+  {
+    "id": "dormant-admin",
+    "name": "Administrator who has not signed in",
+    "rationale": "Standing privilege that nobody is using is pure risk: it will not be noticed when it is abused.",
+    "remediation": "Remove the administrative role, or confirm the account is still needed.",
+    "severity": "high",
+    "applies_to": "entity",
+    "entity_types": ["user"],
+    "condition": "is_admin and (last_login_at is null or last_login_at < days_ago(90))"
+  },
+  {
+    "id": "external-group-sharing",
+    "name": "Account in an external group",
+    "rationale": "Membership of an external group widens who can see internal material.",
+    "remediation": "Confirm the membership is intended.",
+    "severity": "medium",
+    "applies_to": "entity",
+    "condition": "count(groups where external) > 0"
+  },
+  {
+    "id": "orphan-workspace-account",
+    "name": "Workspace account with no directory counterpart",
+    "rationale": "An account the identity provider does not know about will not be deprovisioned when its owner leaves.",
+    "remediation": "Link the account to a person, or remove it.",
+    "severity": "high",
+    "applies_to": "person",
+    "condition": "has_entity(\"workspace\" where status == \"active\") and not has_entity(\"idp\")",
+    "suppress_if_pending_links": true
+  },
+  {
+    "id": "suspended-with-admin",
+    "name": "Suspended account that still holds admin",
+    "rationale": "Suspension that leaves privilege behind is not suspension.",
+    "remediation": "Remove the administrative role.",
+    "severity": "high",
+    "applies_to": "entity",
+    "condition": "status == \"suspended\" and is_admin"
+  }
+]

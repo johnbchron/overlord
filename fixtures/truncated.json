@@ -1,0 +1,21 @@
+{
+  "system_kind": "workspace",
+  "entity_type": "user",
+  "stages": [
+    {
+      "note": "a full enumeration",
+      "records": [
+        { "key": "ada@example.com", "state": "active", "mfa": true },
+        { "key": "grace@example.com", "state": "active", "mfa": false },
+        { "key": "alan@example.com", "state": "active", "mfa": true },
+        { "key": "svc-deploy@example.com", "state": "active", "mfa": false }
+      ]
+    },
+    {
+      "partial": "rate limited after the first page",
+      "records": [
+        { "key": "ada@example.com", "state": "active", "mfa": true }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,90 @@
+{
+  "system_kind": "workspace",
+  "entity_type": "user",
+  "stages": [
+    {
+      "note": "steady state",
+      "records": [
+        {
+          "key": "ada@example.com",
+          "name": "Ada Lovelace",
+          "state": "active",
+          "mfa": true,
+          "admin": false,
+          "last_login": "2026-01-14T09:00:00Z",
+          "department": "engineering",
+          "groups": [{ "name": "eng", "external": false }]
+        },
+        {
+          "key": "grace@example.com",
+          "name": "Grace Hopper",
+          "state": "active",
+          "mfa": false,
+          "admin": true,
+          "last_login": "2025-06-01T00:00:00Z",
+          "department": "engineering",
+          "groups": [
+            { "name": "eng", "external": false },
+            { "name": "partners", "external": true }
+          ]
+        },
+        {
+          "key": "alan@example.com",
+          "name": "Alan Turing",
+          "state": "active",
+          "mfa": true,
+          "admin": false,
+          "last_login": "2026-01-02T00:00:00Z",
+          "department": "research",
+          "groups": [{ "name": "research", "external": false }]
+        },
+        {
+          "key": "svc-deploy@example.com",
+          "name": "Deploy Robot",
+          "state": "active",
+          "mfa": false,
+          "admin": true,
+          "department": "platform",
+          "groups": []
+        }
+      ]
+    },
+    {
+      "note": "grace enrols in MFA; alan has left",
+      "records": [
+        {
+          "key": "ada@example.com",
+          "name": "Ada Lovelace",
+          "state": "active",
+          "mfa": true,
+          "admin": false,
+          "last_login": "2026-01-16T09:00:00Z",
+          "department": "engineering",
+          "groups": [{ "name": "eng", "external": false }]
+        },
+        {
+          "key": "grace@example.com",
+          "name": "Grace Hopper",
+          "state": "active",
+          "mfa": true,
+          "admin": true,
+          "last_login": "2026-01-16T08:00:00Z",
+          "department": "engineering",
+          "groups": [
+            { "name": "eng", "external": false },
+            { "name": "partners", "external": true }
+          ]
+        },
+        {
+          "key": "svc-deploy@example.com",
+          "name": "Deploy Robot",
+          "state": "active",
+          "mfa": false,
+          "admin": true,
+          "department": "platform",
+          "groups": []
+        }
+      ]
+    }
+  ]
+}

@@ -205,9 +205,15 @@ copy (§14).
 
 ### 3.3 Projections (droppable, rebuildable)
 
-`entity`, `person`, `person_alias`, `link`, `suggestion`, `check`,
-`check_revision`, `check_dryrun`, `violation`, `violation_event`, `sweep_system`,
-`person_score`, `normalization_ruleset`.
+`entity`, `person`, `person_alias`, `link`, `link_primary`, `suggestion`,
+`check_head`, `check_revision`, `check_dryrun`, `violation`,
+`violation_event`, `person_score`, `normalization_ruleset`.
+
+`sweep` and `sweep_system` are **not** projections, though an earlier draft of
+this plan listed the latter as one. They record what a connector actually
+reported during a run — including whether the absence guard tripped, a
+decision taken with the snapshot in hand — which is not derivable from the
+streams. Clearing them would lose data, not rebuild it.
 
 Shapes worth pinning down now:
 

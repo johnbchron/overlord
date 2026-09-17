@@ -1,0 +1,29 @@
+{
+  "system_kind": "idp",
+  "entity_type": "user",
+  "stages": [
+    {
+      "note": "ada and grace have directory accounts; the robot does not",
+      "records": [
+        {
+          "key": "ada@example.com",
+          "name": "Ada Lovelace",
+          "state": "active",
+          "mfa": true,
+          "admin": false,
+          "last_login": "2026-01-14T09:05:00Z",
+          "groups": [{ "name": "everyone", "external": false }]
+        },
+        {
+          "key": "grace@example.com",
+          "name": "Grace Hopper",
+          "state": "active",
+          "mfa": false,
+          "admin": true,
+          "last_login": "2025-06-01T00:05:00Z",
+          "groups": [{ "name": "everyone", "external": false }]
+        }
+      ]
+    }
+  ]
+}

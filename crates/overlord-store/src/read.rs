@@ -1,0 +1,731 @@
+//! Read models. All reading happens against projections (SPEC.md
+//! section 13); nothing here touches the streams except to show history.
+
+use overlord_core::{
+  CheckDraft, CheckId, CheckRecord, EntityRef, EntityStatus, NormalizedRecord,
+  PersonUid, Revision, Severity, SubjectKind, SubjectRef, SweepId, SystemId,
+  Timestamp, ViolationState,
+};
+use rusqlite::{OptionalExtension, params};
+
+use crate::{
+  db::{Reader, get_payload},
+  error::{Result, StoreError},
+};
+
+/// One entity as evaluation needs it.
+#[derive(Debug, Clone)]
+pub struct EntityState {
+  pub entity: EntityRef,
+  pub normalized: NormalizedRecord,
+  pub raw: serde_json::Value,
+  /// The fact this state came from, which evidence cites.
+  pub fact_id: i64,
+}
+
+/// A violation as the board shows it.
+#[derive(Debug, Clone)]
+pub struct ViolationRow {
+  pub check_id: CheckId,
+  pub check_name: String,
+  pub subject: SubjectRef,
+  pub episode: i64,
+  pub state: ViolationState,
+  pub severity: Severity,
+  pub weight: i64,
+  pub opened_at: Timestamp,
+  pub opened_sweep: SweepId,
+  pub evidence: overlord_core::Evidence,
+  pub stale: bool,
+  pub ambiguous: bool,
+  /// The overlay was applied under an older revision of the check, so
+  /// the acknowledgement predates the rule as it now reads.
+  pub overlay_stale: bool,
+  /// This episode opened in the most recent sweep that covered its
+  /// subject (SPEC.md sections 5 and 8).
+  ///
+  /// Computed per system, not against the latest sweep overall. That
+  /// distinction is the whole point: with a single global comparison, a
+  /// sweep restricted to one system would empty the "new" section for
+  /// every other system, and SPEC.md section 10 is explicit that
+  /// restricting a sweep must not manufacture change.
+  pub new_since: bool,
+}
+
+/// A subject's risk score (SPEC.md section 8).
+#[derive(Debug, Clone)]
+pub struct ScoreRow {
+  pub person_uid: PersonUid,
+  pub display_name: Option<String>,
+  pub implicit: bool,
+  pub score: i64,
+  pub count: i64,
+  pub worst_severity: Option<Severity>,
+}
+
+impl Reader<'_> {
+  // --- checks ---------------------------------------------------------
+
+  /// Every check with its current revision and enabled state.
+  ///
+  /// # Errors
+  /// On a SQLite failure or unreadable stored JSON.
+  pub fn checks(&self) -> Result<Vec<CheckRecord>> {
+    let mut stmt = self.conn().prepare(
+      "SELECT h.check_id, h.revision, h.enabled, r.draft
+         FROM check_head h
+         JOIN check_revision r
+           ON r.check_id = h.check_id AND r.revision = h.revision
+        ORDER BY h.check_id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+      Ok((
+        r.get::<_, u32>(1)?,
+        r.get::<_, i64>(2)? != 0,
+        r.get::<_, String>(3)?,
+      ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+      let (revision, enabled, draft) = row?;
+      out.push(CheckRecord {
+        draft: serde_json::from_str::<CheckDraft>(&draft)?,
+        revision: Revision(revision),
+        enabled,
+      });
+    }
+    Ok(out)
+  }
+
+  /// The checks a sweep would pin: enabled, at their current revision.
+  ///
+  /// # Errors
+  /// As [`Self::checks`].
+  pub fn enabled_checks(&self) -> Result<Vec<CheckRecord>> {
+    Ok(self.checks()?.into_iter().filter(|c| c.enabled).collect())
+  }
+
+  /// One specific revision, which is what a sweep evaluates — a sweep
+  /// pins revisions at its start, so a later edit cannot change a run
+  /// in progress.
+  ///
+  /// # Errors
+  /// [`StoreError::NotFound`] if that revision was never recorded.
+  pub fn check_revision(
+    &self,
+    id: &CheckId,
+    revision: Revision,
+  ) -> Result<CheckDraft> {
+    let draft: Option<String> = self
+      .conn()
+      .query_row(
+        "SELECT draft FROM check_revision
+          WHERE check_id = ?1 AND revision = ?2",
+        params![id.as_str(), revision.0],
+        |r| r.get(0),
+      )
+      .optional()?;
+    let draft = draft.ok_or_else(|| {
+      StoreError::not_found(format!("check {id} revision {revision}"))
+    })?;
+    Ok(serde_json::from_str(&draft)?)
+  }
+
+  /// Whether a dry-run exists for an exact `(check, revision)`.
+  ///
+  /// # Errors
+  /// On a SQLite failure.
+  pub fn has_dryrun(&self, id: &CheckId, revision: Revision) -> Result<bool> {
+    let n: i64 = self.conn().query_row(
+      "SELECT count(*) FROM check_dryrun
+        WHERE check_id = ?1 AND revision = ?2",
+      params![id.as_str(), revision.0],
+      |r| r.get(0),
+    )?;
+    Ok(n > 0)
+  }
+
+  // --- entities -------------------------------------------------------
+
+  /// Present entities, optionally restricted to some systems.
+  ///
+  /// Absent entities are excluded: an entity whose latest fact is a
+  /// tombstone is out of scope entirely (SPEC.md section 6.1).
+  ///
+  /// # Errors
+  /// On a SQLite failure or unreadable stored JSON.
+  pub fn entity_states(
+    &self,
+    systems: Option<&[SystemId]>,
+  ) -> Result<Vec<EntityState>> {
+    let mut stmt = self.conn().prepare(
+      "SELECT system, entity_type, entity_key, normalized, raw_hash,
+              latest_fact_id
+         FROM entity
+        WHERE present = 1 AND normalized IS NOT NULL
+        ORDER BY system, entity_type, entity_key",
+    )?;
+    let rows = stmt.query_map([], |r| {
+      Ok((
+        EntityRef::new(
+          r.get::<_, String>(0)?,
+          r.get::<_, String>(1)?,
+          r.get::<_, String>(2)?,
+        ),
+        r.get::<_, String>(3)?,
+        r.get::<_, Option<String>>(4)?,
+        r.get::<_, i64>(5)?,
+      ))
+    })?;
+
+    let mut out = Vec::new();
+    for row in rows {
+      let (entity, normalized, raw_hash, fact_id) = row?;
+      if let Some(only) = systems
+        && !only.contains(&entity.system)
+      {
+        continue;
+      }
+      let raw = match raw_hash {
+        Some(h) => serde_json::from_str(&get_payload(self.conn(), &h)?)?,
+        None => serde_json::Value::Null,
+      };
+      out.push(EntityState {
+        entity,
+        normalized: serde_json::from_str(&normalized)?,
+        raw,
+        fact_id,
+      });
+    }
+    Ok(out)
+  }
+
+  /// The confirmed person an entity belongs to, if any.
+  ///
+  /// # Errors
+  /// On a SQLite failure.
+  pub fn person_of(&self, entity: &EntityRef) -> Result<Option<PersonUid>> {
+    let uid: Option<String> = self
+      .conn()
+      .query_row(
+        "SELECT person_uid FROM link
+          WHERE system = ?1 AND entity_type = ?2 AND entity_key = ?3",
+        params![
+          entity.system.as_str(),
+          entity.entity_type.as_str(),
+          entity.entity_key.as_str(),
+        ],
+        |r| r.get(0),
+      )
+      .optional()?;
+    Ok(uid.map(PersonUid::new))
+  }
+
+  /// Every confirmed link, as `(entity, person)`.
+  ///
+  /// # Errors
+  /// On a SQLite failure.
+  pub fn links(&self) -> Result<Vec<(EntityRef, PersonUid)>> {
+    let mut stmt = self.conn().prepare(
+      "SELECT system, entity_type, entity_key, person_uid FROM link",
+    )?;
+    let rows = stmt.query_map([], |r| {
+      Ok((
+        EntityRef::new(
+          r.get::<_, String>(0)?,
+          r.get::<_, String>(1)?,
+          r.get::<_, String>(2)?,
+        ),
+        PersonUid::new(r.get::<_, String>(3)?),
+      ))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+  }
+
+  /// Operator-designated primaries, as `(person, system_kind, entity)`.
+  ///
+  /// # Errors
+  /// On a SQLite failure.
+  pub fn primaries(&self) -> Result<Vec<(PersonUid, String, EntityRef)>> {
+    let mut stmt = self.conn().prepare(
+      "SELECT person_uid, system_kind, system, entity_type, entity_key
+         FROM link_primary",
+    )?;
+    let rows = stmt.query_map([], |r| {
+      Ok((
+        PersonUid::new(r.get::<_, String>(0)?),
+        r.get::<_, String>(1)?,
+        EntityRef::new(
+          r.get::<_, String>(2)?,
+          r.get::<_, String>(3)?,
+          r.get::<_, String>(4)?,
+        ),
+      ))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+  }
+
+  /// Follow a merge chain to the surviving uid. A uid that was never
+  /// retired resolves to itself.
+  ///
+  /// # Errors
+  /// On a SQLite failure.
+  pub fn resolve_person(&self, uid: &PersonUid) -> Result<PersonUid> {
+    let mut current = uid.clone();
+    // Merges rewrite existing aliases to point at the new survivor, so
+    // this terminates in one hop in practice; the bound is belt and
+    // braces against a cycle in a damaged store.
+    for _ in 0..16 {
+      let next: Option<String> = self
+        .conn()
+        .query_row(
+          "SELECT surviving_uid FROM person_alias WHERE retired_uid = ?1",
+          [current.as_str()],
+          |r| r.get(0),
+        )
+        .optional()?;
+      match next {
+        Some(n) => current = PersonUid::new(n),
+        None => return Ok(current),
+      }
+    }
+    Ok(current)
+  }
+
+  // --- violations -----------------------------------------------------
+
+  /// The board: active violations, worst first, then longest-ignored
+  /// (SPEC.md section 8).
+  ///
+  /// # Errors
+  /// On a SQLite failure or unreadable stored JSON.
+  pub fn violations(
+    &self,
+    states: &[ViolationState],
+    limit: usize,
+  ) -> Result<Vec<ViolationRow>> {
+    let latest_per_system = self.latest_sweep_per_system()?;
+    let latest_overall = self.latest_sweep()?;
+    let wanted: Vec<&str> = states.iter().map(|s| s.as_str()).collect();
+    let placeholders = (1..=wanted.len())
+      .map(|i| format!("?{i}"))
+      .collect::<Vec<_>>()
+      .join(", ");
+    let sql = format!(
+      "SELECT v.check_id, v.subject_ref, v.episode, v.state, v.severity,
+              v.weight, v.opened_at, v.opened_sweep, v.evidence, v.stale,
+              v.ambiguous, v.overlay_rev, h.revision, r.draft
+         FROM violation v
+         LEFT JOIN check_head h ON h.check_id = v.check_id
+         LEFT JOIN check_revision r
+           ON r.check_id = v.check_id AND r.revision = h.revision
+        WHERE v.state IN ({placeholders})
+        ORDER BY v.weight DESC, v.opened_at ASC, v.check_id
+        LIMIT ?{}",
+      wanted.len() + 1
+    );
+
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = wanted
+      .iter()
+      .map(|s| Box::new((*s).to_owned()) as Box<dyn rusqlite::ToSql>)
+      .collect();
+    params.push(Box::new(i64::try_from(limit).unwrap_or(i64::MAX)));
+    let refs: Vec<&dyn rusqlite::ToSql> =
+      params.iter().map(AsRef::as_ref).collect();
+
+    let mut stmt = self.conn().prepare(&sql)?;
+    let rows = stmt.query_map(refs.as_slice(), |r| {
+      Ok((
+        r.get::<_, String>(0)?,
+        r.get::<_, String>(1)?,
+        r.get::<_, i64>(2)?,
+        r.get::<_, String>(3)?,
+        r.get::<_, String>(4)?,
+        r.get::<_, i64>(5)?,
+        r.get::<_, String>(6)?,
+        r.get::<_, i64>(7)?,
+        r.get::<_, String>(8)?,
+        r.get::<_, i64>(9)? != 0,
+        r.get::<_, i64>(10)? != 0,
+        r.get::<_, Option<u32>>(11)?,
+        r.get::<_, Option<u32>>(12)?,
+        r.get::<_, Option<String>>(13)?,
+      ))
+    })?;
+
+    let mut out = Vec::new();
+    for row in rows {
+      let (
+        check_id,
+        subject_ref,
+        episode,
+        state,
+        severity,
+        weight,
+        opened_at,
+        opened_sweep,
+        evidence,
+        stale,
+        ambiguous,
+        overlay_rev,
+        head_rev,
+        draft,
+      ) = row?;
+      let name = match &draft {
+        Some(d) => serde_json::from_str::<CheckDraft>(d)?.name,
+        None => check_id.clone(),
+      };
+      let subject: SubjectRef = subject_ref.parse()?;
+      let opened_sweep = SweepId(opened_sweep);
+
+      // An entity-scoped violation is measured against the last sweep
+      // that covered *its* system. A person-scoped one is measured
+      // against the latest sweep overall, because person checks are
+      // re-evaluated on every run whatever it covered — a person spans
+      // systems, so there is no single system to ask.
+      let benchmark = match &subject {
+        SubjectRef::Entity(e) => latest_per_system.get(&e.system).copied(),
+        SubjectRef::Person(_) => latest_overall,
+      };
+
+      out.push(ViolationRow {
+        check_id: CheckId::new(check_id),
+        check_name: name,
+        new_since: benchmark == Some(opened_sweep),
+        subject,
+        episode,
+        state: state.parse()?,
+        severity: severity.parse()?,
+        weight,
+        opened_at: opened_at.parse()?,
+        opened_sweep,
+        evidence: serde_json::from_str(&evidence)?,
+        stale,
+        ambiguous,
+        overlay_stale: matches!(
+          (overlay_rev, head_rev),
+          (Some(o), Some(h)) if o != h
+        ),
+      });
+    }
+    Ok(out)
+  }
+
+  /// Subjects ranked by risk (SPEC.md section 8).
+  ///
+  /// # Errors
+  /// On a SQLite failure.
+  pub fn top_subjects(&self, limit: usize) -> Result<Vec<ScoreRow>> {
+    let mut stmt = self.conn().prepare(
+      "SELECT s.person_uid, s.score, s.violation_count, s.worst_severity,
+              p.display_name, p.implicit
+         FROM person_score s
+         LEFT JOIN person p ON p.person_uid = s.person_uid
+        WHERE s.score > 0
+        ORDER BY s.score DESC, s.worst_severity ASC, s.person_uid
+        LIMIT ?1",
+    )?;
+    let rows =
+      stmt.query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |r| {
+        Ok((
+          r.get::<_, String>(0)?,
+          r.get::<_, i64>(1)?,
+          r.get::<_, i64>(2)?,
+          r.get::<_, Option<String>>(3)?,
+          r.get::<_, Option<String>>(4)?,
+          r.get::<_, Option<i64>>(5)?,
+        ))
+      })?;
+
+    let mut out = Vec::new();
+    for row in rows {
+      let (uid, score, count, worst, display_name, implicit) = row?;
+      let uid = PersonUid::new(uid);
+      let implicit = implicit.map_or_else(|| uid.is_implicit(), |i| i != 0);
+      out.push(ScoreRow {
+        person_uid: uid,
+        display_name,
+        implicit,
+        score,
+        count,
+        worst_severity: worst.as_deref().map(str::parse).transpose()?,
+      });
+    }
+    Ok(out)
+  }
+
+  // --- sweeps ---------------------------------------------------------
+
+  /// The most recent committed sweep.
+  ///
+  /// # Errors
+  /// On a SQLite failure.
+  pub fn latest_sweep(&self) -> Result<Option<SweepId>> {
+    let id: Option<i64> = self
+      .conn()
+      .query_row(
+        "SELECT id FROM sweep WHERE committed_seq IS NOT NULL
+          ORDER BY id DESC LIMIT 1",
+        [],
+        |r| r.get(0),
+      )
+      .optional()?;
+    Ok(id.map(SweepId))
+  }
+
+  /// A sweep's start time, which is the definition of "now" for
+  /// everything it produced.
+  ///
+  /// # Errors
+  /// [`StoreError::NotFound`] if the sweep is unknown.
+  pub fn sweep_started_at(&self, sweep: SweepId) -> Result<Timestamp> {
+    let at: Option<String> = self
+      .conn()
+      .query_row(
+        "SELECT started_at FROM sweep WHERE id = ?1",
+        [sweep.0],
+        |r| r.get(0),
+      )
+      .optional()?;
+    at.ok_or_else(|| StoreError::not_found(format!("sweep {sweep}")))?
+      .parse()
+      .map_err(Into::into)
+  }
+}
+
+/// Summary counts used by the CLI and the Systems screen.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Counts {
+  pub entities: usize,
+  pub persons: usize,
+  pub checks: usize,
+  pub violations: usize,
+}
+
+impl Reader<'_> {
+  /// Row counts across the projections.
+  ///
+  /// # Errors
+  /// On a SQLite failure.
+  pub fn counts(&self) -> Result<Counts> {
+    let one = |sql: &str| -> Result<usize> {
+      let n: i64 = self.conn().query_row(sql, [], |r| r.get(0))?;
+      Ok(usize::try_from(n).unwrap_or(0))
+    };
+    Ok(Counts {
+      entities: one("SELECT count(*) FROM entity WHERE present = 1")?,
+      persons: one("SELECT count(*) FROM person")?,
+      checks: one("SELECT count(*) FROM check_head")?,
+      violations: one(
+        "SELECT count(*) FROM violation
+          WHERE state IN ('open', 'acknowledged')",
+      )?,
+    })
+  }
+}
+
+/// The status an entity reports, for display.
+#[must_use]
+pub fn status_of(normalized: &NormalizedRecord) -> EntityStatus {
+  normalized.status
+}
+
+/// Which scope a subject belongs to.
+#[must_use]
+pub fn subject_kind(subject: &SubjectRef) -> SubjectKind {
+  subject.kind()
+}
+
+impl Reader<'_> {
+  /// The systems a sweep actually covered, with whether each returned a
+  /// complete enumeration.
+  ///
+  /// SPEC.md section 10: a partial sweep must not re-evaluate
+  /// entity-scoped checks for systems it did not visit, and must mark
+  /// person-scoped results that lean on last-known state.
+  ///
+  /// # Errors
+  /// On a SQLite failure.
+  pub fn swept_systems(
+    &self,
+    sweep: SweepId,
+  ) -> Result<Vec<(SystemId, overlord_core::SystemKind, bool)>> {
+    let mut stmt = self.conn().prepare(
+      "SELECT system, system_kind, complete FROM sweep_system
+        WHERE sweep_id = ?1 AND status IN ('ok', 'partial')",
+    )?;
+    let rows = stmt.query_map([sweep.0], |r| {
+      Ok((
+        r.get::<_, String>(0)?,
+        r.get::<_, String>(1)?,
+        r.get::<_, i64>(2)? != 0,
+      ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+      let (system, kind, complete) = row?;
+      out.push((SystemId::new(system), kind.parse()?, complete));
+    }
+    Ok(out)
+  }
+
+  /// Entities with unreviewed link suggestions, for a check that sets
+  /// `suppress_if_pending_links`.
+  ///
+  /// # Errors
+  /// On a SQLite failure.
+  pub fn entities_with_pending_suggestions(&self) -> Result<Vec<EntityRef>> {
+    let mut stmt = self.conn().prepare(
+      "SELECT DISTINCT s.system, s.entity_type, s.entity_key
+         FROM suggestion s
+         LEFT JOIN link l
+           ON l.system = s.system AND l.entity_type = s.entity_type
+          AND l.entity_key = s.entity_key
+        WHERE l.person_uid IS NULL",
+    )?;
+    let rows = stmt.query_map([], |r| {
+      Ok(EntityRef::new(
+        r.get::<_, String>(0)?,
+        r.get::<_, String>(1)?,
+        r.get::<_, String>(2)?,
+      ))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+  }
+
+  /// Episodes whose suppression has expired as of `now`.
+  ///
+  /// # Errors
+  /// On a SQLite failure.
+  pub fn expired_suppressions(
+    &self,
+    now: Timestamp,
+  ) -> Result<Vec<(String, String, i64)>> {
+    let mut stmt = self.conn().prepare(
+      "SELECT check_id, subject_ref, episode FROM violation
+        WHERE state = 'suppressed' AND suppress_until IS NOT NULL
+          AND suppress_until <= ?1",
+    )?;
+    let rows = stmt.query_map([now.to_string()], |r| {
+      Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+  }
+}
+
+impl Reader<'_> {
+  /// The check revisions a sweep pinned when it started.
+  ///
+  /// Evaluation uses these, not the current ones: a later edit must not
+  /// change a run in progress or its replay (SPEC.md section 10).
+  ///
+  /// # Errors
+  /// On a SQLite failure or unreadable stored JSON.
+  pub fn sweep_pins(&self, sweep: SweepId) -> Result<Vec<(CheckId, Revision)>> {
+    let json: String = self.conn().query_row(
+      "SELECT pinned_checks FROM sweep WHERE id = ?1",
+      [sweep.0],
+      |r| r.get(0),
+    )?;
+    let pins: Vec<(String, u32)> = serde_json::from_str(&json)?;
+    Ok(
+      pins
+        .into_iter()
+        .map(|(id, rev)| (CheckId::new(id), Revision(rev)))
+        .collect(),
+    )
+  }
+
+  /// Every system overlord has ever observed, with its kind.
+  ///
+  /// # Errors
+  /// On a SQLite failure.
+  pub fn known_systems(
+    &self,
+  ) -> Result<Vec<(SystemId, overlord_core::SystemKind)>> {
+    let mut stmt = self.conn().prepare(
+      "SELECT DISTINCT system, system_kind FROM sweep_system
+        ORDER BY system",
+    )?;
+    let rows = stmt.query_map([], |r| {
+      Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+      let (id, kind) = row?;
+      out.push((SystemId::new(id), kind.parse()?));
+    }
+    Ok(out)
+  }
+}
+
+impl Reader<'_> {
+  /// Open violations per check, for the Rules screen's counts and its
+  /// zero-match flag (SPEC.md section 5).
+  ///
+  /// # Errors
+  /// On a SQLite failure.
+  pub fn open_counts_by_check(&self) -> Result<Vec<(CheckId, i64)>> {
+    let mut stmt = self.conn().prepare(
+      "SELECT check_id, count(*) FROM violation
+        WHERE state IN ('open', 'acknowledged')
+        GROUP BY check_id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+      Ok((CheckId::new(r.get::<_, String>(0)?), r.get::<_, i64>(1)?))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+  }
+
+  /// A check's false-positive rate: the share of its episodes an
+  /// operator marked as the rule's fault rather than the subject's.
+  /// SPEC.md section 9 calls this a rule-quality signal.
+  ///
+  /// # Errors
+  /// On a SQLite failure.
+  pub fn false_positive_rate(&self, check: &CheckId) -> Result<Option<f64>> {
+    let (total, fp): (i64, i64) = self.conn().query_row(
+      "SELECT count(*),
+              sum(CASE WHEN state = 'false_positive' THEN 1 ELSE 0 END)
+         FROM violation WHERE check_id = ?1",
+      [check.as_str()],
+      |r| Ok((r.get(0)?, r.get::<_, Option<i64>>(1)?.unwrap_or(0))),
+    )?;
+    if total == 0 {
+      return Ok(None);
+    }
+    #[allow(clippy::cast_precision_loss)]
+    Ok(Some(fp as f64 / total as f64))
+  }
+}
+
+impl Reader<'_> {
+  /// The most recent committed sweep that covered each system.
+  ///
+  /// The benchmark "new since last sweep" measures against (SPEC.md
+  /// sections 8 and 10). One grouped statement rather than a query per
+  /// system, because the board asks for all of them at once.
+  ///
+  /// A system that has never been swept successfully is absent from the
+  /// map, so nothing on it counts as new — there is no previous look to
+  /// compare against.
+  ///
+  /// # Errors
+  /// On a SQLite failure.
+  pub fn latest_sweep_per_system(
+    &self,
+  ) -> Result<std::collections::BTreeMap<SystemId, SweepId>> {
+    let mut stmt = self.conn().prepare(
+      "SELECT ss.system, max(s.id)
+         FROM sweep s
+         JOIN sweep_system ss ON ss.sweep_id = s.id
+        WHERE s.committed_seq IS NOT NULL
+          AND ss.status IN ('ok', 'partial')
+        GROUP BY ss.system",
+    )?;
+    let rows = stmt.query_map([], |r| {
+      Ok((SystemId::new(r.get::<_, String>(0)?), SweepId(r.get(1)?)))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+  }
+}

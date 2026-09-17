@@ -1,0 +1,12 @@
+# PLAN.md section 5, "Determinism": evaluation's only clock is a sweep's
+# `started_at`. Reading a wall clock anywhere in the evaluation path would
+# make `replay(streams) == live` false in a way no test could catch
+# reliably, so the clock is denied workspace-wide and unbanned at the two
+# places entitled to it: `overlord_core::Timestamp::now`, and the sweep
+# runner that stamps `started_at`.
+disallowed-methods = [
+  { path = "std::time::SystemTime::now", reason = "use overlord_core::Timestamp::now, or take the sweep's started_at" },
+  { path = "std::time::Instant::now", reason = "durations belong to sweep metadata; use overlord_core::Timestamp" },
+  { path = "jiff::Timestamp::now", reason = "use overlord_core::Timestamp::now" },
+  { path = "jiff::Zoned::now", reason = "overlord records UTC only" },
+]

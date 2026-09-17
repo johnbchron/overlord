@@ -1,0 +1,41 @@
+{
+  "system_kind": "workspace",
+  "entity_type": "user",
+  "stages": [
+    {
+      "note": "ten accounts, fully enumerated",
+      "records": [
+        { "key": "u01@example.com", "state": "active", "mfa": true },
+        { "key": "u02@example.com", "state": "active", "mfa": true },
+        { "key": "u03@example.com", "state": "active", "mfa": true },
+        { "key": "u04@example.com", "state": "active", "mfa": true },
+        { "key": "u05@example.com", "state": "active", "mfa": true },
+        { "key": "u06@example.com", "state": "active", "mfa": true },
+        { "key": "u07@example.com", "state": "active", "mfa": true },
+        { "key": "u08@example.com", "state": "active", "mfa": true },
+        { "key": "u09@example.com", "state": "active", "mfa": true },
+        { "key": "u10@example.com", "state": "active", "mfa": true }
+      ]
+    },
+    {
+      "note": "the vendor claims a complete snapshot with one account in it; nine of ten would be tombstoned, so the guard must refuse",
+      "records": [
+        { "key": "u01@example.com", "state": "active", "mfa": true }
+      ]
+    },
+    {
+      "note": "one genuine departure: one of ten is inside the guard's threshold... but 10% is not more than 10%, so it is written",
+      "records": [
+        { "key": "u01@example.com", "state": "active", "mfa": true },
+        { "key": "u02@example.com", "state": "active", "mfa": true },
+        { "key": "u03@example.com", "state": "active", "mfa": true },
+        { "key": "u04@example.com", "state": "active", "mfa": true },
+        { "key": "u05@example.com", "state": "active", "mfa": true },
+        { "key": "u06@example.com", "state": "active", "mfa": true },
+        { "key": "u07@example.com", "state": "active", "mfa": true },
+        { "key": "u08@example.com", "state": "active", "mfa": true },
+        { "key": "u09@example.com", "state": "active", "mfa": true }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+# A local demo against the fixture connector: no credentials, no network.
+#
+#   cargo run -- -c examples/fixture.toml checks import examples/starter-checks.json
+#   cargo run -- -c examples/fixture.toml checks dry-run mfa-missing
+#   cargo run -- -c examples/fixture.toml checks enable mfa-missing
+#   cargo run -- -c examples/fixture.toml sweep
+#   cargo run -- -c examples/fixture.toml violations
+
+[store]
+path = "overlord.db"
+
+[sweep]
+absence_guard_pct = 10
+
+[[systems]]
+id = "gws-prod"
+connector = "fixture"
+config = { path = "fixtures/baseline.json", stage = 0 }
+
+[[systems]]
+id = "okta-prod"
+connector = "fixture"
+config = { path = "fixtures/idp.json", stage = 0 }
