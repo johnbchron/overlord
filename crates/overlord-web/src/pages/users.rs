@@ -42,9 +42,10 @@ pub async fn list(
   let content = html! {
     (layout::head(
       "Users",
-      "Ranked by the sum of weights of active violations. Confirming a \
-       link never changes a total — it merges two scores rather than \
-       revealing a new one.",
+      "Every person and unlinked account overlord has collected, ranked \
+       by the sum of weights of active violations — a clean account \
+       scores zero and sorts last. Confirming a link never changes a \
+       total: it merges two scores rather than revealing a new one.",
       html! {},
     ))
 
@@ -128,9 +129,13 @@ fn body(state: &AppState, query: &UsersQuery) -> Result<Markup> {
     });
   }
 
+  // Everyone, not only the subjects carrying risk: an account with a
+  // clean record missing from this list is indistinguishable from an
+  // account overlord never collected, and the first thing an operator
+  // does after a sweep is look for somebody they know is there.
   let rows: Vec<ScoreRow> = state
     .db
-    .read(|r| r.top_subjects(200))?
+    .read(|r| r.all_subjects(200))?
     .into_iter()
     .filter(|r| match query.kind.as_str() {
       "confirmed" => !r.implicit,
@@ -142,7 +147,11 @@ fn body(state: &AppState, query: &UsersQuery) -> Result<Markup> {
   Ok(html! {
     div class="panel" {
       @if rows.is_empty() {
-        (layout::empty("Nobody is carrying risk."))
+        (layout::empty(
+          "Nobody here yet. Run a sweep: this list is the accounts \
+           overlord has collected, whether or not anything is wrong \
+           with them.",
+        ))
       } @else {
         table {
           thead {
@@ -158,7 +167,16 @@ fn body(state: &AppState, query: &UsersQuery) -> Result<Markup> {
             @for r in &rows {
               @let subject = SubjectRef::Person(r.person_uid.clone());
               tr {
-                td class="shrink num" { b { (r.score) } }
+                td class="shrink num" {
+                  // A zero is a real answer here — nothing is open
+                  // against them — but it is not a number to read
+                  // first, so it is not set in bold like the rest.
+                  @if r.score > 0 {
+                    b { (r.score) }
+                  } @else {
+                    span class="muted" { "0" }
+                  }
+                }
                 td { (view::subject(&subject, r.display_name.as_deref())) }
                 td class="shrink" {
                   @match r.worst_severity {

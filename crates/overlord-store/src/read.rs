@@ -63,6 +63,31 @@ pub struct ScoreRow {
   pub worst_severity: Option<Severity>,
 }
 
+/// One row of a subject ranking, however the ranking was assembled.
+///
+/// `implicit` is stored on `person`, so a query that reaches the row
+/// through that table knows the answer; one that does not falls back to
+/// the shape of the uid, which carries it (SPEC.md section 6.4).
+fn score_row(
+  uid: String,
+  score: i64,
+  count: i64,
+  worst: Option<String>,
+  display_name: Option<String>,
+  implicit: Option<i64>,
+) -> Result<ScoreRow> {
+  let uid = PersonUid::new(uid);
+  let implicit = implicit.map_or_else(|| uid.is_implicit(), |i| i != 0);
+  Ok(ScoreRow {
+    person_uid: uid,
+    display_name,
+    implicit,
+    score,
+    count,
+    worst_severity: worst.as_deref().map(str::parse).transpose()?,
+  })
+}
+
 impl Reader<'_> {
   // --- checks ---------------------------------------------------------
 
@@ -706,16 +731,74 @@ impl Reader<'_> {
     let mut out = Vec::new();
     for row in rows {
       let (uid, score, count, worst, display_name, implicit) = row?;
-      let uid = PersonUid::new(uid);
-      let implicit = implicit.map_or_else(|| uid.is_implicit(), |i| i != 0);
-      out.push(ScoreRow {
-        person_uid: uid,
-        display_name,
-        implicit,
-        score,
-        count,
-        worst_severity: worst.as_deref().map(str::parse).transpose()?,
-      });
+      out.push(score_row(uid, score, count, worst, display_name, implicit)?);
+    }
+    Ok(out)
+  }
+
+  /// Every subject overlord knows about, ranked the same way.
+  ///
+  /// [`Self::top_subjects`] answers "who is worst", so it reads
+  /// `person_score` alone — and an account with nothing against it has
+  /// no row in that table at all. The Users screen asks the other
+  /// question, "who is there", where a clean account missing from the
+  /// list reads as overlord never having collected it. So the universe
+  /// here is the one evaluation itself builds (SPEC.md section 6.4):
+  /// every confirmed person, plus an implicit singleton for every
+  /// present unlinked entity, with a score left-joined on and its
+  /// absence meaning zero.
+  ///
+  /// An implicit person is labelled with its account's own display
+  /// name, which `person` cannot supply because an unlinked account has
+  /// no row there.
+  ///
+  /// # Errors
+  /// On a SQLite failure.
+  pub fn all_subjects(&self, limit: usize) -> Result<Vec<ScoreRow>> {
+    let mut stmt = self.conn().prepare(
+      "WITH subject AS (
+         SELECT p.person_uid AS uid, p.display_name AS display_name,
+                0 AS implicit
+           FROM person p
+          WHERE p.implicit = 0
+         UNION ALL
+         SELECT 'implicit:' || e.system || '/' || e.entity_type || '/'
+                  || e.entity_key,
+                json_extract(e.normalized, '$.display_name'),
+                1
+           FROM entity e
+           LEFT JOIN link l
+             ON l.system = e.system AND l.entity_type = e.entity_type
+                AND l.entity_key = e.entity_key
+          WHERE e.present = 1 AND e.normalized IS NOT NULL
+            AND l.person_uid IS NULL
+       )
+       SELECT subject.uid, coalesce(s.score, 0),
+              coalesce(s.violation_count, 0), s.worst_severity,
+              subject.display_name, subject.implicit
+         FROM subject
+         LEFT JOIN person_score s ON s.person_uid = subject.uid
+        ORDER BY coalesce(s.score, 0) DESC, s.worst_severity ASC,
+                 lower(coalesce(subject.display_name, subject.uid)),
+                 subject.uid
+        LIMIT ?1",
+    )?;
+    let rows =
+      stmt.query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |r| {
+        Ok((
+          r.get::<_, String>(0)?,
+          r.get::<_, i64>(1)?,
+          r.get::<_, i64>(2)?,
+          r.get::<_, Option<String>>(3)?,
+          r.get::<_, Option<String>>(4)?,
+          r.get::<_, Option<i64>>(5)?,
+        ))
+      })?;
+
+    let mut out = Vec::new();
+    for row in rows {
+      let (uid, score, count, worst, display_name, implicit) = row?;
+      out.push(score_row(uid, score, count, worst, display_name, implicit)?);
     }
     Ok(out)
   }

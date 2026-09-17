@@ -528,3 +528,82 @@ fn a_rebuild_keeps_the_overlay_that_was_live_at_the_time() {
   );
   assert_eq!(states[0].normalized.get("mfa_enrolled"), Value::Bool(true));
 }
+
+// --- who the Users screen lists ---------------------------------------
+
+#[test]
+fn every_collected_account_is_listed_even_with_nothing_against_it() {
+  let db = db();
+  let s = sweep(&db, T0);
+
+  let mut ada = user_fact("ada@x.com", EntityStatus::Active, true);
+  ada.normalized.as_mut().unwrap().display_name = Some("Ada Lovelace".into());
+  let grace = user_fact("grace@x.com", EntityStatus::Active, false);
+  db.write(|w| w.append_facts(s, &[ada, grace])).unwrap();
+  db.write(|w| w.commit_sweep(s, SweepStatus::Ok, ts(T0)))
+    .unwrap();
+
+  // Grace is linked to a confirmed person; Ada is not.
+  let person = PersonUid::new("P");
+  db.write(|w| {
+    w.append_command(&cmd(
+      CommandKind::PersonLink {
+        person_uid:      person.clone(),
+        entity:          EntityRef::new("gws-prod", "user", "grace@x.com"),
+        from_suggestion: None,
+      },
+      T0,
+    ))
+  })
+  .unwrap();
+
+  // Nothing is open against either of them, so the risk ranking is
+  // empty — and the roster still has to hold both, exactly once each.
+  assert!(db.read(|r| r.top_subjects(50)).unwrap().is_empty());
+
+  let rows = db.read(|r| r.all_subjects(50)).unwrap();
+  let uids: Vec<&str> = rows.iter().map(|r| r.person_uid.as_str()).collect();
+  assert_eq!(uids, vec!["implicit:gws-prod/user/ada@x.com", "P"]);
+
+  let ada = &rows[0];
+  assert!(ada.implicit);
+  assert_eq!(ada.score, 0);
+  assert_eq!(ada.count, 0);
+  assert_eq!(ada.worst_severity, None);
+  // The account's own name, which `person` has no row to supply.
+  assert_eq!(ada.display_name.as_deref(), Some("Ada Lovelace"));
+  assert!(!rows[1].implicit);
+}
+
+#[test]
+fn a_departed_account_leaves_the_roster() {
+  let db = db();
+  let s = sweep(&db, T0);
+  db.write(|w| {
+    w.append_facts(s, &[user_fact("alan@x.com", EntityStatus::Active, true)])
+  })
+  .unwrap();
+  db.write(|w| w.commit_sweep(s, SweepStatus::Ok, ts(T0)))
+    .unwrap();
+  assert_eq!(db.read(|r| r.all_subjects(50)).unwrap().len(), 1);
+
+  // A tombstone makes the entity absent, and an absent account is not
+  // somebody evaluation still judges (SPEC.md section 6.4).
+  let s = sweep(&db, T1);
+  db.write(|w| {
+    w.append_facts(s, &[NewFact {
+      system:       SystemId::new("gws-prod"),
+      entity_type:  EntityType::new("user"),
+      entity_key:   EntityKey::new("alan@x.com"),
+      observed_at:  ts(T1),
+      raw:          None,
+      normalized:   None,
+      norm_version: "gworkspace/1".to_owned(),
+    }])
+  })
+  .unwrap();
+  db.write(|w| w.commit_sweep(s, SweepStatus::Ok, ts(T1)))
+    .unwrap();
+
+  assert!(db.read(|r| r.all_subjects(50)).unwrap().is_empty());
+}

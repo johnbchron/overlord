@@ -197,7 +197,7 @@ async fn every_screen_is_reachable() {
   for (uri, marker) in [
     ("/", "New since the last sweep"),
     ("/rules", "Checks are the only detection mechanism"),
-    ("/users", "Ranked by the sum of weights"),
+    ("/users", "Every person and unlinked account"),
     ("/identity", "Proposed links, computed fresh each sweep"),
     ("/sweeps", "the definition of"),
     ("/systems", "overlord never writes to any of them"),
@@ -978,4 +978,48 @@ fn urlencoding(s: &str) -> String {
     }
   }
   out
+}
+
+#[tokio::test]
+async fn an_account_with_nothing_against_it_is_still_on_the_users_screen() {
+  // No checks enabled, so no subject has a score at all. The screen
+  // still has to show the four accounts the sweep collected: an
+  // operator who has just swept looks for somebody they know is there,
+  // and an empty list reads as a broken connector.
+  let db = Arc::new(Db::open_memory().unwrap());
+  let systems = vec![system("gws-prod", "baseline.json", 0)];
+  let registry = Arc::new(Registry::new().with(FixtureConnector::boxed()));
+  run_sweep(&db, &registry, &SweepPlan::new(systems.clone()).at(ts(NOW)))
+    .await
+    .unwrap();
+  let state = state_for(db, registry, systems, AuthMode::Dev {
+    actor: "tester".to_owned(),
+  });
+
+  let html = page(&state, "/users").await;
+  for name in ["Ada Lovelace", "Grace Hopper", "Deploy Robot"] {
+    assert!(html.contains(name), "{name} is missing from /users");
+  }
+  // Listed as themselves, not as their uid (SPEC.md section 6.4).
+  assert!(!html.contains("implicit:gws-prod"), "{html}");
+}
+
+#[tokio::test]
+async fn the_users_screen_ranks_risk_first_and_clean_accounts_last() {
+  let state = seeded().await;
+  let html = page(&state, "/users").await;
+
+  let grace = html.find("Grace Hopper").expect("grace");
+  let ada = html.find("Ada Lovelace").expect("ada");
+  assert!(grace < ada, "the worst subject must lead the list");
+
+  // The filter is a filter, not a different list: asking for confirmed
+  // persons only on a store where nobody is linked yields nobody.
+  let confirmed = page(&state, "/users/results?kind=confirmed").await;
+  assert!(!confirmed.contains("Ada Lovelace"), "{confirmed}");
+  assert!(
+    page(&state, "/users/results?kind=implicit")
+      .await
+      .contains("Ada Lovelace")
+  );
 }
