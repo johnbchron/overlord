@@ -18,6 +18,10 @@ use crate::{
   view,
 };
 
+/// One configured system, its connector, and every endpoint that
+/// connector may reach with the reason it asked for it.
+type Reach = (String, String, Vec<(String, &'static str)>);
+
 pub async fn list(
   identity: Identity,
   State(state): State<AppState>,
@@ -32,6 +36,24 @@ pub async fn list(
   let never_swept: Vec<&overlord_engine::SystemConfig> = configured
     .iter()
     .filter(|c| !rows.iter().any(|r| r.system == c.id))
+    .collect();
+
+  // What each configured system's connector is permitted to reach. The
+  // point of showing it is the decision it informs: an operator about to
+  // grant a vendor scope should be able to see, without reading Rust,
+  // that the grant is wider than the use.
+  let registry = state.sweeps.registry();
+  let reach: Vec<Reach> = configured
+    .iter()
+    .map(|c| {
+      let allowed = registry.get(&c.connector).map_or_else(Vec::new, |k| {
+        k.allowlist()
+          .into_iter()
+          .map(|a| (a.to_string(), a.reason))
+          .collect()
+      });
+      (c.id.to_string(), c.connector.clone(), allowed)
+    })
     .collect();
 
   let content = html! {
@@ -106,6 +128,43 @@ pub async fn list(
                       "this connector has never succeeded"
                     }
                   }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    h2 { "What each connector can reach" }
+    p class="lede" {
+      "Every request a connector makes is matched against this list \
+       before it is sent, and anything unlisted fails closed without a \
+       network call. There is no way to name a mutating HTTP method."
+    }
+
+    @for (system, connector, allowed) in &reach {
+      div class="panel" {
+        div class="panel-body" {
+          div class="row" {
+            span class="k" { "System" }
+            b { (system) }
+            span class="k" { "Connector" }
+            span class="tag" { (connector) }
+          }
+        }
+        @if allowed.is_empty() {
+          (layout::empty("This connector reaches nothing at all."))
+        } @else {
+          table {
+            thead {
+              tr { th { "Endpoint" } th { "Why" } }
+            }
+            tbody {
+              @for (endpoint, reason) in allowed {
+                tr {
+                  td { code { (endpoint) } }
+                  td class="soft" { (reason) }
                 }
               }
             }

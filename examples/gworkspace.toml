@@ -1,0 +1,80 @@
+# A real Google Workspace tenant, read-only.
+#
+#   OVERLORD_GWS_CREDENTIALS=/run/secrets/overlord-gws.json \
+#     cargo run -- -c examples/gworkspace.toml sweep
+#
+# Before the first sweep, grant the service account's client id the
+# scopes below in the Admin console, under
+#
+#   Security → Access and data control → API controls
+#           → Domain-wide delegation → Add new
+#
+# Those scopes are the whole of what overlord can do to the tenant:
+#
+#   https://www.googleapis.com/auth/admin.directory.user.readonly
+#   https://www.googleapis.com/auth/admin.directory.group.readonly
+#   https://www.googleapis.com/auth/admin.directory.domain.readonly
+#
+# and, only if `licenses` below is non-empty:
+#
+#   https://www.googleapis.com/auth/apps.licensing
+#
+# The last one is not read-only, because Google publishes no read-only
+# variant of it. overlord never writes — it cannot name a mutating HTTP
+# method, and its allowlist permits exactly one licensing path — but the
+# grant is wider than the use. Leave `licenses` empty and neither the
+# scope nor the grant is needed.
+
+[store]
+path = "overlord.db"
+
+[sweep]
+absence_guard_pct = 10
+
+[server]
+bind = "127.0.0.1:8080"
+
+[[systems]]
+connector = "google-workspace"
+id = "gws-prod"
+
+[systems.config]
+# `my_customer` is the customer the impersonated administrator belongs
+# to. A reseller managing several tenants names the customer id instead.
+customer = "C014l3em6"
+
+# A service account reads a Workspace tenant by domain-wide delegation,
+# which has no meaning without a subject: this is the administrator whose
+# authority is borrowed. Give it an account that can read the directory
+# and nothing more.
+impersonate = "jblewis@liveoakclassical.com"
+
+# The environment variable holding the credential — either the JSON
+# Google wrote or a path to it. Never the credential itself: SPEC.md
+# section 14 keeps secrets out of this file and out of the streams.
+credentials_env = "OVERLORD_GWS_CREDENTIALS"
+
+# Group membership is one API call per group. Turning it off makes a
+# sweep of a group-heavy tenant much faster, at the cost of an overlay
+# that cannot answer a sharing question at all.
+groups = true
+
+# Licence assignments are enumerated per SKU — Google offers no "all of
+# them" call — so each one an operator cares about is named here. Empty
+# is the default, and is what keeps `apps.licensing` unrequested.
+#
+# [[systems.config.licenses]]
+# product = "Google-Apps"
+# sku     = "1010020020"   # Workspace Business Standard
+
+# Authentication for the operator UI (SPEC.md section 14). The client
+# secret comes from OVERLORD_OIDC_CLIENT_SECRET and never from here.
+# Without `allowed_subjects` or `required_group`, overlord refuses to
+# start: authentication alone is not sufficient.
+#
+# [auth]
+# issuer           = "https://id.example.com"
+# client_id        = "overlord"
+# redirect_url     = "https://overlord.example.com/auth/callback"
+# allowed_subjects = ["you@example.com"]
+# required_group   = "secops"

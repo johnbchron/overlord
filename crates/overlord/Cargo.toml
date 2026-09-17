@@ -14,6 +14,7 @@ path = "src/main.rs"
 overlord-core.workspace = true
 overlord-connect.workspace = true
 overlord-connector-fixture.workspace = true
+overlord-connector-gworkspace.workspace = true
 overlord-engine.workspace = true
 overlord-expr.workspace = true
 overlord-store.workspace = true

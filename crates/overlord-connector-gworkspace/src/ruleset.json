@@ -1,0 +1,47 @@
+{
+  "id": "gworkspace-default",
+  "version": "1",
+  "system_kind": "workspace",
+  "entity_type": "user",
+  "entity_key": { "path": "user.id" },
+  "display_name": { "path": "user.name.fullName" },
+  "status": {
+    "when": [
+      { "path": "user.archived", "map": { "true": "deprovisioned" } },
+      { "path": "user.suspended", "map": { "true": "suspended", "false": "active" } }
+    ],
+    "default": "unknown"
+  },
+  "fields": {
+    "email": { "path": "user.primaryEmail", "as": "string" },
+    "username": { "path": "user.primaryEmail", "as": "email_local" },
+    "employee_id": { "path": "external_ids.organization", "as": "string" },
+    "aliases": { "path": "user.aliases", "as": "list" },
+    "non_editable_aliases": { "path": "user.nonEditableAliases", "as": "list" },
+    "mfa_enrolled": { "path": "user.isEnrolledIn2Sv", "as": "boolean" },
+    "mfa_enforced": { "path": "user.isEnforcedIn2Sv", "as": "boolean" },
+    "is_admin": { "path": "user.isAdmin", "as": "boolean" },
+    "is_delegated_admin": { "path": "user.isDelegatedAdmin", "as": "boolean" },
+    "last_login_at": {
+      "path": "user.lastLoginTime",
+      "as": "timestamp",
+      "null_if": ["1970-01-01T00:00:00.000Z"]
+    },
+    "created_at": { "path": "user.creationTime", "as": "timestamp" },
+    "archived": { "path": "user.archived", "as": "boolean" },
+    "suspension_reason": { "path": "user.suspensionReason", "as": "string" },
+    "agreed_to_terms": { "path": "user.agreedToTerms", "as": "boolean" },
+    "change_password_at_next_login": {
+      "path": "user.changePasswordAtNextLogin",
+      "as": "boolean"
+    },
+    "mailbox_setup": { "path": "user.isMailboxSetup", "as": "boolean" },
+    "org_unit_path": { "path": "user.orgUnitPath", "as": "string" },
+    "department": { "path": "organization.department", "as": "string" },
+    "title": { "path": "organization.title", "as": "string" },
+    "recovery_email": { "path": "user.recoveryEmail", "as": "string" },
+    "customer_id": { "path": "user.customerId", "as": "string" },
+    "groups": { "path": "groups", "as": "list" },
+    "licenses": { "path": "licenses", "as": "list" }
+  }
+}

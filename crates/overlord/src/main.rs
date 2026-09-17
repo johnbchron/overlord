@@ -13,6 +13,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use overlord_connect::Registry;
 use overlord_connector_fixture::FixtureConnector;
+use overlord_connector_gworkspace::GoogleWorkspaceConnector;
 use overlord_core::{
   Actor, CheckDraft, CheckId, CommandKind, EntityRef, NewCommand, PersonUid,
   SubjectRef, SuppressReason, SystemId, Timestamp, ViolationState,
@@ -338,7 +339,14 @@ async fn main() -> Result<()> {
   Ok(())
 }
 
-fn registry() -> Registry { Registry::new().with(FixtureConnector::boxed()) }
+/// Every connector this binary knows about. Adding one is a line here
+/// and a crate (PLAN.md section 2) — nothing else depends on the
+/// concrete implementations.
+fn registry() -> Registry {
+  Registry::new()
+    .with(FixtureConnector::boxed())
+    .with(GoogleWorkspaceConnector::boxed())
+}
 
 fn append(
   db: &Db,

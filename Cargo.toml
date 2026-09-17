@@ -14,6 +14,7 @@ overlord-expr = { path = "crates/overlord-expr" }
 overlord-store = { path = "crates/overlord-store" }
 overlord-connect = { path = "crates/overlord-connect" }
 overlord-connector-fixture = { path = "crates/overlord-connector-fixture" }
+overlord-connector-gworkspace = { path = "crates/overlord-connector-gworkspace" }
 overlord-engine = { path = "crates/overlord-engine" }
 overlord-web = { path = "crates/overlord-web" }
 
@@ -40,6 +41,8 @@ axum = { version = "0.8", features = ["macros"] }
 maud = { version = "0.27", features = ["axum"] }
 tower = "0.5"
 openidconnect = { version = "4", default-features = false, features = ["reqwest", "rustls-tls"] }
+jsonwebtoken = { version = "11", default-features = false, features = ["use_pem", "rust_crypto"] }
+wiremock = "0.6"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

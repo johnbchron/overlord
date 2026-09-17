@@ -1,19 +1,27 @@
 //! The only HTTP surface a connector is given.
 //!
 //! SPEC.md section 11: overlord reads systems and never writes to them,
-//! and that is enforced "by construction, not by policy alone". Two
+//! and that is enforced "by construction, not by policy alone". Three
 //! mechanisms do it here.
 //!
 //! First, [`ReadMethod`] has no mutating variant, so a connector cannot
 //! *express* a `PUT`, `PATCH` or `DELETE` — there is no value to pass.
 //! `POST` exists because several vendor read APIs require it (batch
-//! reads, some search endpoints) and is documented as such.
+//! reads, some search endpoints, every OAuth token grant) and is
+//! documented as such.
 //!
 //! Second, every request is matched against the connector's allowlist of
 //! method-and-path pairs before it is sent. Anything unlisted fails
 //! closed, without a network call.
+//!
+//! Third, the allowlist covers *origins* as well as paths. A connector
+//! that needs a second host — a token endpoint, a sibling API on its own
+//! domain — declares it in the same list, so one screen still shows
+//! everything the connector can reach. A client is built for exactly one
+//! origin and carries only that origin's entries, so a path allowed on
+//! the vendor's API is not thereby allowed on its token endpoint.
 
-use std::fmt;
+use std::{fmt, sync::RwLock};
 
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -118,6 +126,12 @@ pub struct Allow {
   pub path:   PathPattern,
   /// Why this endpoint is needed, shown on the Systems screen.
   pub reason: &'static str,
+  /// Which origin this entry applies to. `None` — the usual case —
+  /// means the connector's own [`Connector::base_url`], which is
+  /// per-system and so cannot be named by a constant here.
+  ///
+  /// [`Connector::base_url`]: crate::Connector::base_url
+  pub base:   Option<&'static str>,
 }
 
 impl Allow {
@@ -127,6 +141,7 @@ impl Allow {
       method: ReadMethod::Get,
       path: PathPattern::new(path),
       reason,
+      base: None,
     }
   }
 
@@ -136,33 +151,110 @@ impl Allow {
       method: ReadMethod::Post,
       path: PathPattern::new(path),
       reason,
+      base: None,
     }
+  }
+
+  /// Point this entry at a secondary origin rather than the connector's
+  /// own base URL.
+  #[must_use]
+  pub fn at(mut self, base: &'static str) -> Self {
+    self.base = Some(base);
+    self
   }
 }
 
 impl fmt::Display for Allow {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    write!(f, "{} {}", self.method, self.path)
+    match self.base {
+      Some(base) => {
+        write!(
+          f,
+          "{} {}{}",
+          self.method,
+          base.trim_end_matches('/'),
+          self.path
+        )
+      }
+      None => write!(f, "{} {}", self.method, self.path),
+    }
   }
 }
 
 /// An HTTP client that can only reach a connector's allowlisted
-/// endpoints.
+/// endpoints, on one origin.
 pub struct RestrictedHttp {
   client:  reqwest::Client,
   base:    Url,
   allow:   Vec<Allow>,
+  /// A bearer token, once the connector has obtained one.
+  ///
+  /// Behind a lock rather than fixed at construction because
+  /// `observe` receives `&RestrictedHttp`: the token is acquired
+  /// during the run, and a long run may have to renew it. It is never
+  /// logged and never leaves this struct.
+  bearer:  RwLock<Option<String>>,
   /// Set for tests and dry runs: refuse every request rather than
   /// reaching the network at all.
   offline: bool,
 }
 
 impl RestrictedHttp {
-  /// Build a client pinned to `base`, permitting only `allow`.
+  /// Build a client for the connector's own base URL. It carries the
+  /// allowlist entries that name no other origin.
   ///
   /// # Errors
   /// If `base` is not a valid URL or the TLS stack cannot start.
   pub fn new(base: &str, allow: Vec<Allow>) -> Result<Self, ConnectorError> {
+    Self::build(
+      base,
+      allow.into_iter().filter(|a| a.base.is_none()).collect(),
+    )
+  }
+
+  /// Build a client for one of the connector's secondary origins. It
+  /// carries only the entries that name that origin, so a path allowed
+  /// on the vendor's API is not thereby allowed here.
+  ///
+  /// # Errors
+  /// As [`Self::new`].
+  pub fn at(
+    base: &'static str,
+    allow: Vec<Allow>,
+  ) -> Result<Self, ConnectorError> {
+    Self::at_via(base, base, allow)
+  }
+
+  /// As [`Self::at`], but sending the requests somewhere other than the
+  /// origin they were declared against.
+  ///
+  /// For a deployment whose outbound traffic goes through an egress
+  /// proxy, and for tests that stand a double in front of a vendor. It
+  /// relaxes nothing: the entries carried are still exactly the ones
+  /// written down for `declared`, so the paths and methods reachable
+  /// through `via` are the paths and methods a reviewer approved.
+  ///
+  /// # Errors
+  /// As [`Self::new`].
+  pub fn at_via(
+    declared: &str,
+    via: &str,
+    allow: Vec<Allow>,
+  ) -> Result<Self, ConnectorError> {
+    Self::build(
+      via,
+      allow
+        .into_iter()
+        .filter(|a| a.base == Some(declared))
+        .map(|mut a| {
+          a.base = None;
+          a
+        })
+        .collect(),
+    )
+  }
+
+  fn build(base: &str, allow: Vec<Allow>) -> Result<Self, ConnectorError> {
     let base = Url::parse(base)
       .map_err(|e| ConnectorError::Config(format!("base url: {e}")))?;
     let client = reqwest::Client::builder()
@@ -174,26 +266,30 @@ impl RestrictedHttp {
       client,
       base,
       allow,
+      bearer: RwLock::new(None),
       offline: false,
     })
   }
 
-  /// A client that allowlists the same endpoints but never dials out.
-  /// Used to assert what a connector *would* request.
-  ///
-  /// # Errors
-  /// As [`Self::new`].
-  pub fn offline(
-    base: &str,
-    allow: Vec<Allow>,
-  ) -> Result<Self, ConnectorError> {
-    let mut http = Self::new(base, allow)?;
-    http.offline = true;
-    Ok(http)
+  /// The same client, allowlisting the same endpoints, but refusing to
+  /// dial out. Used to assert what a connector *would* request.
+  #[must_use]
+  pub fn offline(mut self) -> Self {
+    self.offline = true;
+    self
   }
 
   #[must_use]
   pub fn allowlist(&self) -> &[Allow] { &self.allow }
+
+  /// Present this token on every subsequent request.
+  pub fn set_bearer(&self, token: impl Into<String>) {
+    // A poisoned lock here would mean a panic mid-request; replacing
+    // the token is still the right thing to do, and refusing to would
+    // only turn one failure into every failure.
+    let mut slot = self.bearer.write().unwrap_or_else(|e| e.into_inner());
+    *slot = Some(token.into());
+  }
 
   /// Whether a request would be permitted. The check every request goes
   /// through, exposed so a test can assert the boundary directly.
@@ -217,6 +313,40 @@ impl RestrictedHttp {
     path: &str,
     query: &[(&str, String)],
   ) -> Result<serde_json::Value, ConnectorError> {
+    let url = self.check(method, path)?;
+    let mut url = url;
+    for (k, v) in query {
+      url.query_pairs_mut().append_pair(k, v);
+    }
+    self
+      .send(self.client.request(method.to_reqwest(), url), path)
+      .await
+  }
+
+  /// POST a form-encoded body and parse the response as JSON.
+  ///
+  /// This exists for OAuth token grants, which are POSTs that read: they
+  /// exchange a credential for a token and change nothing in the system
+  /// being observed. A connector using it still has to allowlist the
+  /// endpoint, and [`ReadMethod`] still cannot name a mutating method.
+  ///
+  /// # Errors
+  /// As [`Self::json`].
+  pub async fn post_form(
+    &self,
+    path: &str,
+    form: &[(&str, String)],
+  ) -> Result<serde_json::Value, ConnectorError> {
+    let url = self.check(ReadMethod::Post, path)?;
+    self.send(self.client.post(url).form(form), path).await
+  }
+
+  /// Allowlist check and URL resolution, before anything is sent.
+  fn check(
+    &self,
+    method: ReadMethod,
+    path: &str,
+  ) -> Result<Url, ConnectorError> {
     if !self.permits(method, path) {
       return Err(ConnectorError::NotAllowed {
         method,
@@ -229,18 +359,28 @@ impl RestrictedHttp {
         path: path.to_owned(),
       });
     }
-
-    let mut url = self
+    self
       .base
       .join(path.trim_start_matches('/'))
-      .map_err(|e| ConnectorError::Config(format!("path {path}: {e}")))?;
-    for (k, v) in query {
-      url.query_pairs_mut().append_pair(k, v);
-    }
+      .map_err(|e| ConnectorError::Config(format!("path {path}: {e}")))
+  }
 
-    let resp = self
-      .client
-      .request(method.to_reqwest(), url)
+  async fn send(
+    &self,
+    req: reqwest::RequestBuilder,
+    path: &str,
+  ) -> Result<serde_json::Value, ConnectorError> {
+    let token = self
+      .bearer
+      .read()
+      .unwrap_or_else(|e| e.into_inner())
+      .clone();
+    let req = match token {
+      Some(t) => req.bearer_auth(t),
+      None => req,
+    };
+
+    let resp = req
       .send()
       .await
       .map_err(|e| ConnectorError::Transport(e.to_string()))?;
@@ -261,6 +401,7 @@ impl RestrictedHttp {
 
 impl fmt::Debug for RestrictedHttp {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    // The bearer token is deliberately absent: this type is logged.
     f.debug_struct("RestrictedHttp")
       .field("base", &self.base.as_str())
       .field("allow", &self.allow.len())
@@ -273,13 +414,21 @@ impl fmt::Debug for RestrictedHttp {
 mod tests {
   use super::*;
 
-  fn http() -> RestrictedHttp {
-    RestrictedHttp::offline("https://example.test/admin/", vec![
+  const TOKEN: &str = "https://oauth2.example.test/";
+
+  fn allowlist() -> Vec<Allow> {
+    vec![
       Allow::get("/directory/v1/users", "enumerate accounts"),
       Allow::get("/directory/v1/users/*/aliases", "account aliases"),
       Allow::get("/reports/v1/**", "login activity"),
-    ])
-    .unwrap()
+      Allow::post("/token", "exchange a credential for a read token").at(TOKEN),
+    ]
+  }
+
+  fn http() -> RestrictedHttp {
+    RestrictedHttp::new("https://example.test/admin/", allowlist())
+      .unwrap()
+      .offline()
   }
 
   #[test]
@@ -314,6 +463,46 @@ mod tests {
     assert!(
       matches!(err, ConnectorError::NotAllowed { .. }),
       "expected the allowlist to refuse it, got {err:?}"
+    );
+  }
+
+  #[test]
+  fn an_entry_for_another_origin_is_not_carried_by_the_primary_client() {
+    // Otherwise declaring a token endpoint would quietly widen what the
+    // vendor's own API accepts.
+    let primary = http();
+    assert!(!primary.permits(ReadMethod::Post, "/token"));
+    assert_eq!(primary.allowlist().len(), 3);
+  }
+
+  #[test]
+  fn a_secondary_client_carries_only_its_own_origins_entries() {
+    let token = RestrictedHttp::at(TOKEN, allowlist()).unwrap().offline();
+    assert!(token.permits(ReadMethod::Post, "/token"));
+    assert!(!token.permits(ReadMethod::Get, "/directory/v1/users"));
+    assert_eq!(token.allowlist().len(), 1);
+  }
+
+  #[tokio::test]
+  async fn a_form_post_is_allowlisted_like_any_other_request() {
+    let token = RestrictedHttp::at(TOKEN, allowlist()).unwrap().offline();
+    let err = token
+      .post_form("/revoke", &[("token", "x".to_owned())])
+      .await
+      .unwrap_err();
+    assert!(
+      matches!(err, ConnectorError::NotAllowed { .. }),
+      "expected the allowlist to refuse it, got {err:?}"
+    );
+  }
+
+  #[test]
+  fn an_allow_renders_the_origin_it_applies_to() {
+    let entries = allowlist();
+    assert_eq!(entries[0].to_string(), "GET /directory/v1/users");
+    assert_eq!(
+      entries[3].to_string(),
+      "POST https://oauth2.example.test/token"
     );
   }
 

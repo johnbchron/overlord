@@ -14,4 +14,6 @@ pub mod normalize;
 pub use connector::{Connector, Observation, ObserveCtx, Registry, Snapshot};
 pub use error::ConnectorError;
 pub use http::{Allow, PathPattern, ReadMethod, RestrictedHttp};
-pub use normalize::{Coerce, FieldRule, Normalized, Ruleset, StatusRule};
+pub use normalize::{
+  Coerce, FieldRule, Normalized, Ruleset, StatusClause, StatusRule,
+};

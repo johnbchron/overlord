@@ -4,7 +4,7 @@ Working log for the build described in [PLAN.md](PLAN.md). Updated as work
 lands, not in advance. Spec references like (§7) point at
 [SPEC.md](SPEC.md); plan references at PLAN.md.
 
-**Current milestone:** M3 — Identity. **Complete.**
+**Current milestone:** M4 — Breadth. Google Workspace (task 24) complete.
 
 ---
 
@@ -42,13 +42,19 @@ lands, not in advance. Spec references like (§7) point at
 | 22 | Promotion of implicit persons, carrying violation history | done |
 | 23 | `suppress_if_pending_links` honoured during evaluation | done |
 
-`cargo test --workspace`: **223 passing, 0 failing.**
+| # | M4 task | State |
+| --- | --- | --- |
+| 24 | `overlord-connector-gworkspace` | done |
+| 25 | IdP connector (Okta, then Entra ID) | not started |
+| 26 | Access/SSO assignments, then MDM | not started |
+| 27 | Per-connector normalization rulesets, authored as commands | not started |
+
+`cargo test --workspace`: **272 passing, 0 failing.**
 `cargo clippy --workspace --all-targets -- -D warnings`: **clean.**
 `cargo fmt --all -- --check`: **clean.**
 
-M4 (real connectors) and M5 (lifecycle polish) are untouched. Every
-connector so far is the fixture one, so nothing in the tree has yet met a
-vendor's idea of an identifier.
+M4 is part done and M5 (lifecycle polish) is untouched. The tree has now
+met one vendor's idea of an identifier, which is what M4 was ordered for.
 
 ### Try it
 
@@ -71,15 +77,23 @@ For the identity signals in isolation, point a `[[systems]]` pair at
 found per signal, and one deliberately found by none. `fixtures/README.md`
 has the cast.
 
+Against a real tenant, `examples/gworkspace.toml` is the worked example —
+it documents the scopes to grant before the first sweep, and where the
+credential comes from. With none set, `sweep` records a failed system
+saying exactly which environment variable is missing, which is the right
+first thing to see.
+
 ---
 
-## Starting M4 — handoff
+## M4 handoff
 
-Written at the end of M3. PLAN.md §4 lists the M4 tasks: the Google
-Workspace connector first (so the overlay vocabulary is shaped by
-workspace semantics), then an IdP, then access/SSO and MDM, with
-per-connector normalization rulesets authored as commands. This is what
-the code actually leaves you.
+Written at the end of M3, amended when the Google Workspace connector
+landed. PLAN.md §4 lists the M4 tasks: the Google Workspace connector
+first (so the overlay vocabulary is shaped by workspace semantics), then
+an IdP, then access/SSO and MDM, with per-connector normalization
+rulesets authored as commands. Task 24 is done, and "What task 24 leaves
+the IdP connector" below is the part written after it. This is what the
+code actually leaves you.
 
 ### What M3 added that M4 has to feed
 
@@ -292,6 +306,101 @@ has not had operator feedback yet. Three things were flagged as most
 likely to change: the teal accent, the critical-row tint (possibly too
 much at real volume), and the spine width. Treat them as provisional.
 
+### What task 24 leaves the IdP connector
+
+Written when Google Workspace landed. The connector crate is the pattern:
+`crates/overlord-connector-gworkspace/` is `auth.rs` (credentials and the
+token grant), `directory.rs` (paging), `lib.rs` (the trait impl and the
+envelope), `ruleset.json` (the shipped normalization), and two test files.
+An IdP connector should be the same five things.
+
+**Four things in `overlord-connect` grew to fit a real vendor**, and all
+four are the kind an IdP will want too:
+
+- **The allowlist covers origins.** `Allow::at(base)` points an entry at
+  a second host; a client is built for exactly one origin and carries
+  only that origin's entries, so declaring a token endpoint does not
+  widen what the vendor's own API accepts. `Connector::http_for(declared,
+  via)` builds one, where `via` sends the requests through an egress
+  proxy or a test double without changing which of them are permitted.
+  Okta's token endpoint is on the tenant's own host, so it may not need
+  this; Entra's is on `login.microsoftonline.com`, so it will.
+- **`RestrictedHttp` carries a bearer token**, set with `set_bearer`
+  during `observe` — `observe` is handed `&RestrictedHttp`, and the token
+  is not known until the run starts. It is behind a lock, never logged,
+  and absent from the `Debug` rendering.
+- **`post_form`**, for token grants. A grant is a POST that reads, and
+  `ReadMethod` still cannot name a mutating method.
+- **Three additions to the ruleset language**, each forced by Google and
+  each general: `StatusRule` is now a list of clauses tried in order (a
+  vendor's lifecycle state is not always one field — Google spells it
+  across `archived` and `suspended`, and reading only `suspended` calls a
+  deprovisioned account active); `FieldRule.null_if` names the sentinels
+  a vendor uses for absence (Google's `lastLoginTime` of
+  `1970-01-01T00:00:00.000Z`, Entra's `0001-01-01T00:00:00Z`); and
+  `Coerce::EmailLocal` takes the part before the first `@`, because
+  identity's `username` signal needs a username and a directory ships an
+  address. The one-clause `StatusRule` shape still deserializes, so a
+  stored `normalization.upsert` body written before this replays —
+  `the_one_clause_shape_a_stored_ruleset_was_written_in_still_reads`
+  holds that open.
+
+**The key is the vendor's immutable id, not the address.** The Workspace
+ruleset keys on `user.id`. An address is the readable choice and the
+wrong one: a rename would tombstone the account and open a new one,
+losing every episode filed against it. Okta's `id` and Entra's `id` are
+the equivalents. The cost is that the identity fallbacks — "the entity
+key, if email-shaped" — no longer fire, which is exactly why `email`,
+`username` and `employee_id` are all mapped explicitly.
+
+**An observation is an envelope, not a response body.** A user's facts
+come from three APIs, so the raw payload is
+`{ user, external_ids, organization, groups, licenses }` with the vendor
+objects verbatim inside it. `raw.user.<anything>` still reaches what
+Google sent. `external_ids` and `organization` are indexed views of two
+repeated Directory fields, because `Value::get_path` refuses to index a
+list by number (M1's decision: vendor array order is not stable, so
+`externalIds.0.value` would be a check that quietly changes its mind).
+Keying by the vendor's own `type`, and picking the entry it marked
+`primary`, says what was meant. Do the same rather than reopening that
+decision.
+
+**Absent is not empty.** `groups` and `licenses` are left out of the
+envelope entirely when they were not collected, and are an empty list
+when they were collected and there were none. A group read that failed
+must not report "in no external group" for every account in the tenant.
+Which is also why:
+
+**A degraded overlay makes the snapshot partial, not just a warning.**
+If the group or domain read fails, the whole snapshot is `Partial` even
+though every account was enumerated. §10's partial handling — no
+tombstones, violations marked stale — is the right answer for a half-read
+*overlay* as well as a half-read enumeration, because the alternative is
+resolving every sharing violation at once and being confidently wrong.
+An enumeration whose *first* page failed is different: that is
+`ConnectorError::Incomplete`, a failed system, and
+`directory::require_something` is the one line that tells them apart.
+
+**The Systems screen now shows the allowlist**, per configured system,
+with the reason each entry was asked for. `describe_allowlist` had been
+sitting unused since M1 for want of a connector with anything in it. An
+operator about to grant a vendor scope can now see that the grant is
+wider than the use without reading Rust.
+
+**Tests cannot set an environment variable.** `std::env::set_var` is
+unsafe in this edition and `unsafe_code` is forbidden workspace-wide, so
+`GoogleWorkspaceConnector::with_credential` is the seam the wiremock
+tests use. It is reachable only from Rust — a `[[systems]]` entry names a
+connector and the binary's registry calls `new()` — so the environment
+stays the only way a credential reaches a real deployment. An IdP
+connector will need the same seam, and should document it the same way.
+
+**`crates/overlord-connect/tests/read_only.rs`** is PLAN.md §5's second
+promise, finally testable: a connector crate must not depend on an HTTP
+client, because a crate that can build its own client can reach anything.
+It reads the manifests, and it enumerates `crates/overlord-connector-*`
+by directory, so a new connector is covered the moment it exists.
+
 ## Open questions for the operator
 
 1. ~~**rustfmt needs nightly.**~~ Resolved: the flake now pulls nightly,
@@ -361,6 +470,46 @@ much at real volume), and the spine width. Treat them as provisional.
    system a shared id is at least as likely to be a service account
    convention as a person, and a wrong suggestion costs more than a
    missing one. Worth revisiting against a real tenant.
+
+8. **Workspace sharing settings are not collected, and cannot be from
+   the Directory API.** §11 lists sharing settings among a workspace
+   connector's subjects. Domain-level Drive sharing lived in the Admin
+   Settings API, which Google retired; per-account sharing behaviour is a
+   Drive API question, and the narrowest Drive scope that answers it
+   still reads across every user's content. That is a much larger grant
+   than the four the connector asks for, and it is not overlord's to make
+   on an operator's behalf — so it is a separate connector you can
+   decline, not a field quietly added here. Nothing approximates it: a
+   check written against a guessed `external_sharing` would be
+   confidently wrong, which is worse than absent. The starter library's
+   `external-group-sharing` rule is answered instead by real group
+   membership, which is collected.
+
+9. **No retries, and Google rate-limits.** A 429 or 503 mid-enumeration
+   truncates the read and marks the snapshot partial — correct, and safe,
+   but a large tenant may see it routinely rather than exceptionally,
+   because group membership is one call per group. Bounded backoff
+   belongs in `RestrictedHttp` where every connector inherits it, not in
+   this one; it is not built because the right ceiling is a question a
+   real tenant answers and inventing one would be guessing. If the first
+   sweeps come back partial, this is why, and `groups = false` is the
+   configuration that makes them complete at the cost of the sharing
+   overlay.
+
+10. **A sweep fetches one token and does not renew it.** Google's access
+    tokens last an hour. A sweep of a tenant with several thousand groups
+    could outlive that, and would then fail partway with a 401 —
+    reported as a truncated read, so nothing is corrupted, but the sweep
+    is wasted. `set_bearer` takes `&self` precisely so a renewal can be
+    added inside `observe` without changing any signature. Left until a
+    tenant is slow enough to need it.
+
+11. **`apps.licensing` is not read-only, and Google offers no narrower
+    scope.** It is requested only when `licenses` is configured, which is
+    empty by default — so the decision is yours and it is made by adding
+    a SKU, not by installing overlord. §11 asks for exactly this to be
+    declared; it is, in the crate docs, in `examples/gworkspace.toml`,
+    and now on the Systems screen.
 
 ---
 
@@ -846,4 +995,100 @@ three stale proposals joins the person the first created instead of
 minting a rival.
 
 `cargo test --workspace`: 223 passing. `clippy -D warnings` and
+`fmt --check`: clean.
+
+### 2026-09-17 — M4: Google Workspace (task 24)
+
+The first connector that meets a vendor. Admin SDK Directory API, plus
+the Licensing API when an operator asks for it, all read-only.
+
+**What it collects.** Accounts (`projection=full`, which is what carries
+2-step verification, external ids, organizations and aliases), the
+customer's verified domains, groups with their members inverted onto
+accounts, and licence assignments per configured SKU. Everything pages,
+and a `nextPageToken` that repeats stops the loop rather than spinning.
+
+**Four scopes, and one of them is not read-only.** `apps.licensing` has
+no readonly variant — reading which accounts hold which licence takes a
+scope that can also assign and revoke. §11 asks every connector to
+declare exactly this, so it is declared in three places and requested
+only when `licenses` is non-empty. The other three are the `.readonly`
+Directory scopes for users, groups and domains.
+
+**Sharing settings are not collected.** §11 names them, the Directory API
+does not expose them, and the Drive scope that would is far wider than
+anything else here. Recorded as open question 8 rather than approximated:
+a check against a guessed `external_sharing` would be confidently wrong.
+
+**The vendor forced four additions to `overlord-connect`,** and this was
+the point of PLAN.md's ordering note — Workspace lands first so the
+overlay vocabulary is shaped by workspace semantics. The allowlist now
+covers origins (a token endpoint is a second host); `RestrictedHttp`
+carries a bearer token set during `observe`; `post_form` exists for token
+grants; and the ruleset language gained ordered status clauses, `null_if`
+for vendor absence sentinels, and `email_local`. Each was needed to make
+the Workspace overlay *correct*, not convenient:
+
+- Google spells an account's state across `archived` and `suspended`.
+  Read by `suspended` alone, a deprovisioned account is "active", and
+  `status == "active"` is in nearly every check.
+- `lastLoginTime` for an account that has never signed in is the epoch.
+  Coerced literally, "has never signed in" becomes "signed in during the
+  Nixon administration" — the same verdict from a dormancy check, for a
+  reason the evidence would state wrongly.
+- The entity key is `user.id`, Google's immutable one, because keying on
+  the address would turn a rename into a tombstone plus a new account and
+  lose every episode filed against it. That kills the identity
+  fallbacks, which is why `email`, `username` and `employee_id` are all
+  mapped — and `username` is the address's local part, which needed
+  `email_local` to express.
+
+The one-clause `StatusRule` shape still deserializes, so a stored
+`normalization.upsert` body written before today replays.
+
+**An observation is an envelope.** Three APIs feed one account, so the
+raw payload is `{ user, external_ids, organization, groups, licenses }`
+with the vendor objects verbatim inside. `external_ids` and
+`organization` are indexed views of two repeated Directory fields —
+keyed by the vendor's own `type`, and the entry it marked `primary` —
+because M1 decided `get_path` will not index a list by number, vendor
+array order being unstable. That decision was left standing rather than
+reopened; the connector indexes explainably instead.
+
+**Absent is not empty, and a degraded overlay is a partial snapshot.**
+`groups` and `licenses` are left out entirely when not collected and are
+`[]` when collected and empty. A failed group or domain read makes the
+whole snapshot `Partial` even though every account was enumerated,
+because §10's partial handling — no tombstones, violations stale — is
+the right answer for a half-read overlay too. The alternative is
+resolving every sharing violation in the tenant at once.
+`directory::require_something` is what separates that from a failed
+system: an enumeration whose first page failed returns nothing, and
+returning nothing is not a tenant that lost everybody.
+
+**Credentials.** Both shapes Google writes, read from the environment as
+either the JSON or a path to it: a service account (domain-wide
+delegation, `impersonate` required and refused without) and the
+`authorized_user` file `gcloud` leaves behind. The assertion's `iat` is
+the sweep's `started_at`, not a clock read — PLAN.md §5 allows the run
+one clock, taken at the edge, and an assertion is as happy with it.
+`Credential`'s `Debug` says "redacted", it has no `Serialize`, and the
+two error paths that could quote key material report the serde category
+and the variable name instead.
+
+**Tests.** 49 new: wiremock against recorded Directory shapes (two pages,
+a rate-limited second page, a 403 on the first, a failed group read, the
+licensing path), the RS256 signing path against a throwaway key, and the
+allowlist refusing a single-user read, the Reports API and Drive without
+a request reaching the mock server. Plus PLAN.md §5's second promise,
+unfulfilled since M1 for want of a second connector:
+`crates/overlord-connect/tests/read_only.rs` asserts no connector crate
+depends on an HTTP client, by directory scan so the next one is covered
+the moment it exists.
+
+**The Systems screen shows the allowlist**, per system, with the reason
+each entry was asked for. `describe_allowlist` had been written in M1 and
+marked "unused today"; a real connector is what made it worth showing.
+
+`cargo test --workspace`: 272 passing. `clippy -D warnings` and
 `fmt --check`: clean.

@@ -120,6 +120,27 @@ pub trait Connector: Send + Sync {
   fn http(&self, ctx: &ObserveCtx) -> Result<RestrictedHttp, ConnectorError> {
     RestrictedHttp::new(&self.base_url(ctx), self.allowlist())
   }
+
+  /// Build a client for one of the secondary origins this connector
+  /// declared with [`Allow::at`] — a token endpoint, or a sibling API on
+  /// another host.
+  ///
+  /// The returned client carries only that origin's entries, so a
+  /// second host widens the allowlist by exactly what was written down
+  /// for it and nothing else. `via` sends the requests elsewhere (an
+  /// egress proxy, a test double) without changing which of them are
+  /// permitted. Provided for the same reason as [`Self::http`]: the
+  /// allowlist is always the connector's own.
+  ///
+  /// # Errors
+  /// If the base URL is invalid or the TLS stack cannot start.
+  fn http_for(
+    &self,
+    declared: &str,
+    via: Option<&str>,
+  ) -> Result<RestrictedHttp, ConnectorError> {
+    RestrictedHttp::at_via(declared, via.unwrap_or(declared), self.allowlist())
+  }
 }
 
 /// The connectors a binary knows about.

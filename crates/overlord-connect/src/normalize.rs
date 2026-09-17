@@ -28,30 +28,115 @@ pub struct FieldRule {
   /// and the check language handles it deliberately.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub default: Option<serde_json::Value>,
+  /// Raw values that mean "absent", applied before coercion and before
+  /// [`Self::default`].
+  ///
+  /// Vendors spell absence with a sentinel rather than by omitting the
+  /// field: Google reports a user who has never signed in as
+  /// `lastLoginTime: "1970-01-01T00:00:00.000Z"`, and Entra uses
+  /// `"0001-01-01T00:00:00Z"`. Coerced literally, a dormancy check would
+  /// read "has never signed in" as "signed in during the Nixon
+  /// administration" — the same verdict today, but for a reason the
+  /// evidence would state wrongly. Listing the sentinel here makes the
+  /// field null, which is what it means, and keeps the mapping in the
+  /// ruleset where an operator can revise it.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub null_if: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum Coerce {
   String,
   Number,
   Boolean,
   Timestamp,
   List,
+  /// The part of a string before its first `@`, or the whole string if
+  /// it has none.
+  ///
+  /// An extraction rather than a conversion, and the only one, so it
+  /// earns its place by being load-bearing: identity's `username`
+  /// signal (SPEC.md section 12) needs a username, and a directory that
+  /// ships only `primaryEmail` or `profile.login` has one — spelled as
+  /// an address. Without this a connector whose stable key is an opaque
+  /// vendor id offers nothing for that signal at all.
+  EmailLocal,
+}
+
+/// One way of reading a vendor's lifecycle state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StatusClause {
+  pub path: String,
+  /// Keyed by the raw value's string form, so `true` maps as `"true"`.
+  /// A value absent from the map does not match, and the next clause is
+  /// tried.
+  pub map:  BTreeMap<String, EntityStatus>,
 }
 
 /// How to map a vendor's lifecycle state onto the five overlord knows.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Clauses are tried in order and the first that maps wins, because not
+/// every vendor keeps its answer in one field. Google Workspace spells
+/// an account's state across two independent booleans — `archived` and
+/// `suspended` — so a single-path rule has to ignore one of them, and
+/// ignoring `archived` reads a deprovisioned account as active. Order is
+/// the whole of the semantics: put the narrower state first.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct StatusRule {
-  pub path:    String,
-  /// Keyed by the raw value's string form, so `true` maps as `"true"`.
-  pub map:     BTreeMap<String, EntityStatus>,
+  pub when:    Vec<StatusClause>,
   /// What an unmapped value becomes. A connector that cannot map a
   /// vendor state must land on `unknown` rather than guessing:
   /// `status == "active"` appears in nearly every check, so a wrong
   /// guess is a wrong board.
-  #[serde(default = "unknown_status")]
   pub default: EntityStatus,
+}
+
+impl StatusRule {
+  /// The one-clause case, which is most of them.
+  #[must_use]
+  pub fn single(
+    path: impl Into<String>,
+    map: BTreeMap<String, EntityStatus>,
+  ) -> Self {
+    Self {
+      when:    vec![StatusClause {
+        path: path.into(),
+        map,
+      }],
+      default: EntityStatus::Unknown,
+    }
+  }
+}
+
+/// Accepts the one-clause shape a ruleset was written in before clauses
+/// existed, so a stored `normalization.upsert` body still reads.
+impl<'de> Deserialize<'de> for StatusRule {
+  fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Repr {
+      Clauses {
+        when:    Vec<StatusClause>,
+        #[serde(default = "unknown_status")]
+        default: EntityStatus,
+      },
+      Single {
+        path:    String,
+        map:     BTreeMap<String, EntityStatus>,
+        #[serde(default = "unknown_status")]
+        default: EntityStatus,
+      },
+    }
+
+    Ok(match Repr::deserialize(d)? {
+      Repr::Clauses { when, default } => Self { when, default },
+      Repr::Single { path, map, default } => Self {
+        when: vec![StatusClause { path, map }],
+        default,
+      },
+    })
+  }
 }
 
 fn unknown_status() -> EntityStatus { EntityStatus::Unknown }
@@ -121,18 +206,38 @@ impl Ruleset {
       }
     };
 
-    let status_raw = raw.get_path(&self.status.path);
-    let status = status_key(&status_raw)
-      .and_then(|k| self.status.map.get(&k).copied())
-      .unwrap_or_else(|| {
-        if !status_raw.is_null() {
-          warnings.push(format!(
-            "status {status_raw} is not mapped; recorded as {}",
-            self.status.default
-          ));
-        }
-        self.status.default
-      });
+    // The first clause that maps wins. A clause that finds nothing, or
+    // finds a value its map does not name, falls through — that is how
+    // `archived: false` hands the question to `suspended`.
+    let mut status = None;
+    let mut seen: Vec<Value> = Vec::new();
+    for clause in &self.status.when {
+      let raw_status = raw.get_path(&clause.path);
+      if let Some(mapped) =
+        status_key(&raw_status).and_then(|k| clause.map.get(&k).copied())
+      {
+        status = Some(mapped);
+        break;
+      }
+      if !raw_status.is_null() {
+        seen.push(raw_status);
+      }
+    }
+    let status = status.unwrap_or_else(|| {
+      // Silence when every clause found nothing: absence is not a
+      // mapping failure. A value that was present and named by nothing
+      // is, and it is how a vendor's new lifecycle state announces
+      // itself.
+      if !seen.is_empty() {
+        let seen: Vec<String> = seen.iter().map(ToString::to_string).collect();
+        warnings.push(format!(
+          "status {} is not mapped; recorded as {}",
+          seen.join(", "),
+          self.status.default
+        ));
+      }
+      self.status.default
+    });
 
     let mut record = NormalizedRecord::new(
       system.clone(),
@@ -181,6 +286,11 @@ fn status_key(v: &Value) -> Option<String> {
 
 fn read(raw: &Value, rule: &FieldRule, warnings: &mut Vec<String>) -> Value {
   let mut v = raw.get_path(&rule.path);
+  // Sentinels first: a vendor's "never" is absence, so it must reach
+  // `default` the same way a missing path does.
+  if rule.null_if.iter().any(|s| Value::from(s) == v) {
+    v = Value::Null;
+  }
   if v.is_null()
     && let Some(d) = &rule.default
   {
@@ -210,6 +320,7 @@ fn coerce(
         Coerce::Boolean => "boolean",
         Coerce::Timestamp => "timestamp",
         Coerce::List => "list",
+        Coerce::EmailLocal => "string to take a local part from",
       }
     ));
     Value::Null
@@ -238,6 +349,14 @@ fn coerce(
     (Coerce::Timestamp, Value::String(s)) => s
       .parse::<Timestamp>()
       .map_or_else(|_| failed(warnings, &v), Value::Timestamp),
+    // A bare username is already the local part; a directory that
+    // spells logins both ways in one tenant should not lose the ones
+    // that are not addresses.
+    (Coerce::EmailLocal, Value::String(s)) => match s.split_once('@') {
+      Some(("", _)) => failed(warnings, &v),
+      Some((local, _)) => Value::String(local.to_owned()),
+      None => Value::String(s.clone()),
+    },
     // A single value where a list is expected is a list of one; vendors
     // do this for optional repeated fields.
     (Coerce::List, _) => Value::List(vec![v]),
@@ -348,6 +467,7 @@ mod tests {
       path:    "whatever".to_owned(),
       coerce:  None,
       default: None,
+      null_if: Vec::new(),
     });
     let n = rs
       .apply(
@@ -357,6 +477,177 @@ mod tests {
       .unwrap();
     assert_eq!(n.record.status, EntityStatus::Active);
     assert!(n.warnings[0].contains("shadows"), "{:?}", n.warnings);
+  }
+
+  /// Google's shape: two independent booleans, narrower state first.
+  fn two_clause_ruleset() -> Ruleset {
+    serde_json::from_value(serde_json::json!({
+      "id": "two-clause",
+      "version": "1",
+      "system_kind": "workspace",
+      "entity_type": "user",
+      "entity_key": { "path": "primaryEmail" },
+      "status": {
+        "when": [
+          { "path": "archived",  "map": { "true": "deprovisioned" } },
+          { "path": "suspended", "map": { "true": "suspended",
+                                          "false": "active" } }
+        ],
+        "default": "unknown"
+      }
+    }))
+    .unwrap()
+  }
+
+  #[test]
+  fn a_later_clause_answers_what_an_earlier_one_declines() {
+    let n = two_clause_ruleset()
+      .apply(
+        &SystemId::new("gws-prod"),
+        &serde_json::json!({
+          "primaryEmail": "ada@example.com",
+          "archived": false,
+          "suspended": false
+        }),
+      )
+      .unwrap();
+    assert_eq!(n.record.status, EntityStatus::Active);
+    // `archived: false` falling through is the design, not a problem.
+    assert!(n.warnings.is_empty(), "{:?}", n.warnings);
+  }
+
+  #[test]
+  fn an_earlier_clause_wins_when_it_maps() {
+    // An archived account is also suspended in Google's payload; read
+    // by `suspended` alone it would be merely suspended, which is a
+    // different remediation.
+    let n = two_clause_ruleset()
+      .apply(
+        &SystemId::new("gws-prod"),
+        &serde_json::json!({
+          "primaryEmail": "ada@example.com",
+          "archived": true,
+          "suspended": true
+        }),
+      )
+      .unwrap();
+    assert_eq!(n.record.status, EntityStatus::Deprovisioned);
+  }
+
+  #[test]
+  fn a_value_no_clause_names_still_warns() {
+    let n = two_clause_ruleset()
+      .apply(
+        &SystemId::new("gws-prod"),
+        &serde_json::json!({
+          "primaryEmail": "ada@example.com",
+          "archived": false,
+          "suspended": "pending"
+        }),
+      )
+      .unwrap();
+    assert_eq!(n.record.status, EntityStatus::Unknown);
+    assert!(n.warnings[0].contains("not mapped"), "{:?}", n.warnings);
+  }
+
+  #[test]
+  fn the_one_clause_shape_a_stored_ruleset_was_written_in_still_reads() {
+    // `normalization.upsert` bodies are stored as opaque JSON. A store
+    // written before clauses existed must still replay.
+    let old: StatusRule = serde_json::from_value(serde_json::json!({
+      "path": "suspended",
+      "map": { "true": "suspended", "false": "active" },
+      "default": "unknown"
+    }))
+    .unwrap();
+    assert_eq!(old.when.len(), 1);
+    assert_eq!(old.when[0].path, "suspended");
+    assert_eq!(old.default, EntityStatus::Unknown);
+  }
+
+  #[test]
+  fn a_vendor_sentinel_for_never_becomes_null() {
+    let mut rs = ruleset();
+    rs.fields.insert("last_login_at".to_owned(), FieldRule {
+      path:    "lastLoginTime".to_owned(),
+      coerce:  Some(Coerce::Timestamp),
+      default: None,
+      null_if: vec![serde_json::json!("1970-01-01T00:00:00.000Z")],
+    });
+    let n = rs
+      .apply(
+        &SystemId::new("gws-prod"),
+        &serde_json::json!({
+          "primaryEmail": "ada@example.com",
+          "suspended": false,
+          "lastLoginTime": "1970-01-01T00:00:00.000Z"
+        }),
+      )
+      .unwrap();
+    assert_eq!(n.record.get("last_login_at"), Value::Null);
+    // A sentinel is expected data, not a normalization problem.
+    assert!(n.warnings.is_empty(), "{:?}", n.warnings);
+  }
+
+  #[test]
+  fn a_sentinel_does_not_swallow_a_real_value() {
+    let mut rs = ruleset();
+    rs.fields.insert("last_login_at".to_owned(), FieldRule {
+      path:    "lastLoginTime".to_owned(),
+      coerce:  Some(Coerce::Timestamp),
+      default: None,
+      null_if: vec![serde_json::json!("1970-01-01T00:00:00.000Z")],
+    });
+    let n = rs
+      .apply(
+        &SystemId::new("gws-prod"),
+        &serde_json::json!({
+          "primaryEmail": "ada@example.com",
+          "suspended": false,
+          "lastLoginTime": "2026-01-02T03:04:05.000Z"
+        }),
+      )
+      .unwrap();
+    assert_eq!(n.record.get("last_login_at").type_name(), "timestamp");
+  }
+
+  #[test]
+  fn a_username_can_be_taken_from_an_address() {
+    let mut rs = ruleset();
+    rs.fields.insert("username".to_owned(), FieldRule {
+      path:    "primaryEmail".to_owned(),
+      coerce:  Some(Coerce::EmailLocal),
+      default: None,
+      null_if: Vec::new(),
+    });
+    let n = rs
+      .apply(
+        &SystemId::new("gws-prod"),
+        &serde_json::json!({
+          "primaryEmail": "ada.lovelace@example.com",
+          "suspended": false
+        }),
+      )
+      .unwrap();
+    assert_eq!(
+      n.record.get("username"),
+      Value::String("ada.lovelace".to_owned())
+    );
+  }
+
+  #[test]
+  fn a_bare_username_is_left_alone() {
+    // A directory that spells some logins as addresses and some not
+    // should not lose the ones that are not.
+    let mut warnings = Vec::new();
+    let v = coerce(
+      Value::String("ada".to_owned()),
+      Coerce::EmailLocal,
+      "login",
+      &mut warnings,
+    );
+    assert_eq!(v, Value::String("ada".to_owned()));
+    assert!(warnings.is_empty());
   }
 
   #[test]

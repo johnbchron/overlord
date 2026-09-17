@@ -62,6 +62,12 @@ impl SweepRunner {
   #[must_use]
   pub fn configured(&self) -> &[SystemConfig] { &self.systems }
 
+  /// The connectors this binary knows about, so a screen can show what
+  /// each configured system is permitted to reach (SPEC.md section 11
+  /// asks for an allowlist reviewable in one place).
+  #[must_use]
+  pub fn registry(&self) -> &Registry { &self.registry }
+
   /// Start a sweep, returning once it has been handed to a task.
   ///
   /// # Errors
