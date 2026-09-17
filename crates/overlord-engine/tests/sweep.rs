@@ -9,7 +9,8 @@ use overlord_core::{
   ViolationState,
 };
 use overlord_engine::{
-  SweepOutcome, SweepPlan, SystemConfig, checks, run_sweep,
+  SweepOutcome, SweepPlan, SweepProgress, SystemConfig, checks, run_sweep,
+  run_sweep_with_progress,
 };
 use overlord_store::{Db, SweepStatus, SystemStatus};
 
@@ -867,6 +868,65 @@ async fn a_violation_opening_in_the_latest_sweep_of_its_system_is_new() {
     [("mfa-missing".to_owned(), "ws/grace@example.com".to_owned())],
     "the robot's violation is standing, not new"
   );
+}
+
+/// One progress event, flattened to a string so the sequence can be
+/// compared in one assertion.
+fn label(progress: &SweepProgress) -> String {
+  match progress {
+    SweepProgress::Opened { systems, .. } => format!("opened {systems}"),
+    SweepProgress::SystemStarted {
+      system,
+      index,
+      total,
+    } => {
+      format!("start {system} {index}/{total}")
+    }
+    SweepProgress::SystemFinished {
+      system,
+      index,
+      total,
+    } => {
+      format!("done {system} {index}/{total}")
+    }
+    SweepProgress::Detail { note, .. } => format!("detail: {note}"),
+    SweepProgress::Evaluating { systems } => format!("evaluating {systems}"),
+  }
+}
+
+#[tokio::test]
+async fn progress_narrates_each_system_in_order() {
+  use std::sync::{Arc, Mutex};
+
+  let db = Db::open_memory().unwrap();
+  install(&db, &mfa_missing());
+
+  let seen: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+  let sink = Arc::clone(&seen);
+  run_sweep_with_progress(
+    &db,
+    &registry(),
+    &plan(
+      vec![
+        system("ws", "baseline.json", 0),
+        system("idp", "baseline.json", 0),
+      ],
+      NOW,
+    ),
+    move |progress| sink.lock().unwrap().push(label(&progress)),
+  )
+  .await
+  .unwrap();
+
+  let seen = seen.lock().unwrap().clone();
+  assert_eq!(seen, [
+    "opened 2".to_owned(),
+    "start ws 1/2".to_owned(),
+    "done ws 1/2".to_owned(),
+    "start idp 2/2".to_owned(),
+    "done idp 2/2".to_owned(),
+    "evaluating 2".to_owned(),
+  ]);
 }
 
 #[tokio::test]

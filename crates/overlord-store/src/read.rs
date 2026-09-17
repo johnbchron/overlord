@@ -63,6 +63,36 @@ pub struct ScoreRow {
   pub worst_severity: Option<Severity>,
 }
 
+/// Which half of the roster a subject listing asks for.
+///
+/// The Users screen offers this as a filter, and it belongs in the query
+/// rather than in the caller: confirmed persons and unlinked accounts
+/// are ranked together, so filtering after a `LIMIT` would silently
+/// answer "the confirmed persons among the worst N subjects" — a
+/// shorter list than the one asked for, with nothing to say it was cut.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SubjectFilter {
+  /// Confirmed persons and unlinked accounts alike.
+  #[default]
+  Everyone,
+  /// Confirmed persons only: somebody an operator has linked.
+  Confirmed,
+  /// Unlinked accounts only, each an implicit singleton person.
+  Unlinked,
+}
+
+impl SubjectFilter {
+  /// The `implicit` value this filter selects, or `None` for no
+  /// restriction.
+  fn as_sql(self) -> Option<i64> {
+    match self {
+      Self::Everyone => None,
+      Self::Confirmed => Some(0),
+      Self::Unlinked => Some(1),
+    }
+  }
+}
+
 /// One row of a subject ranking, however the ranking was assembled.
 ///
 /// `implicit` is stored on `person`, so a query that reaches the row
@@ -752,9 +782,20 @@ impl Reader<'_> {
   /// name, which `person` cannot supply because an unlinked account has
   /// no row there.
   ///
+  /// `kind` narrows the roster *before* `limit` applies. It has to
+  /// happen here rather than in the caller: the two kinds are
+  /// interleaved by score, so a caller that took the top `limit`
+  /// subjects and then kept the confirmed ones would drop every
+  /// confirmed person ranked below the cut and show a short list as if
+  /// it were the whole one.
+  ///
   /// # Errors
   /// On a SQLite failure.
-  pub fn all_subjects(&self, limit: usize) -> Result<Vec<ScoreRow>> {
+  pub fn all_subjects(
+    &self,
+    kind: SubjectFilter,
+    limit: usize,
+  ) -> Result<Vec<ScoreRow>> {
     let mut stmt = self.conn().prepare(
       "WITH subject AS (
          SELECT p.person_uid AS uid, p.display_name AS display_name,
@@ -778,13 +819,15 @@ impl Reader<'_> {
               subject.display_name, subject.implicit
          FROM subject
          LEFT JOIN person_score s ON s.person_uid = subject.uid
+        WHERE ?2 IS NULL OR subject.implicit = ?2
         ORDER BY coalesce(s.score, 0) DESC, s.worst_severity ASC,
                  lower(coalesce(subject.display_name, subject.uid)),
                  subject.uid
         LIMIT ?1",
     )?;
-    let rows =
-      stmt.query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |r| {
+    let rows = stmt.query_map(
+      params![i64::try_from(limit).unwrap_or(i64::MAX), kind.as_sql()],
+      |r| {
         Ok((
           r.get::<_, String>(0)?,
           r.get::<_, i64>(1)?,
@@ -793,7 +836,8 @@ impl Reader<'_> {
           r.get::<_, Option<String>>(4)?,
           r.get::<_, Option<i64>>(5)?,
         ))
-      })?;
+      },
+    )?;
 
     let mut out = Vec::new();
     for row in rows {

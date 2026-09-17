@@ -26,7 +26,10 @@ use std::{fmt, sync::RwLock};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::error::ConnectorError;
+use crate::{
+  error::ConnectorError,
+  progress::{Progress, ProgressEvent},
+};
 
 /// The methods overlord can issue. There is deliberately no way to name
 /// a mutating one.
@@ -184,19 +187,27 @@ impl fmt::Display for Allow {
 /// An HTTP client that can only reach a connector's allowlisted
 /// endpoints, on one origin.
 pub struct RestrictedHttp {
-  client:  reqwest::Client,
-  base:    Url,
-  allow:   Vec<Allow>,
+  client:         reqwest::Client,
+  base:           Url,
+  allow:          Vec<Allow>,
   /// A bearer token, once the connector has obtained one.
   ///
   /// Behind a lock rather than fixed at construction because
   /// `observe` receives `&RestrictedHttp`: the token is acquired
   /// during the run, and a long run may have to renew it. It is never
   /// logged and never leaves this struct.
-  bearer:  RwLock<Option<String>>,
+  bearer:         RwLock<Option<String>>,
   /// Set for tests and dry runs: refuse every request rather than
   /// reaching the network at all.
-  offline: bool,
+  offline:        bool,
+  /// Extra roots, kept so later builder calls can rebuild the client
+  /// without losing them.
+  roots:          Vec<Vec<u8>>,
+  /// Refuse to verify the server's certificate. Off unless a connector
+  /// explicitly asks; see [`Self::insecure`].
+  accept_invalid: bool,
+  /// Where each request is narrated. Inert unless a sweep is watching.
+  progress:       Progress,
 }
 
 impl RestrictedHttp {
@@ -257,18 +268,81 @@ impl RestrictedHttp {
   fn build(base: &str, allow: Vec<Allow>) -> Result<Self, ConnectorError> {
     let base = Url::parse(base)
       .map_err(|e| ConnectorError::Config(format!("base url: {e}")))?;
-    let client = reqwest::Client::builder()
-      .user_agent(concat!("overlord/", env!("CARGO_PKG_VERSION")))
-      .timeout(std::time::Duration::from_secs(30))
-      .build()
-      .map_err(|e| ConnectorError::Config(e.to_string()))?;
+    let client = client(&[], false)?;
     Ok(Self {
       client,
       base,
       allow,
       bearer: RwLock::new(None),
       offline: false,
+      roots: Vec::new(),
+      accept_invalid: false,
+      progress: Progress::default(),
     })
+  }
+
+  /// Narrate each request to `progress`, so a screen watching a sweep
+  /// sees the connector working rather than waiting in silence.
+  ///
+  /// The default [`crate::Connector::http`] attaches the context's own
+  /// handle; this is the seam for a caller that builds a client some
+  /// other way.
+  #[must_use]
+  pub fn with_progress(mut self, progress: Progress) -> Self {
+    self.progress = progress;
+    self
+  }
+
+  /// Trust one additional root certificate, given as PEM.
+  ///
+  /// A self-hosted system — an appliance console with a certificate
+  /// signed by its own CA — is not reachable through the public roots
+  /// `reqwest` ships. This is the narrow way to add exactly that CA and
+  /// nothing else: verification stays on, a host the CA did not sign is
+  /// still refused, and there is deliberately no "skip verification"
+  /// counterpart.
+  ///
+  /// # Errors
+  /// If the PEM does not parse or the TLS stack cannot restart.
+  pub fn trusted(mut self, pem: &[u8]) -> Result<Self, ConnectorError> {
+    if pem.is_empty() {
+      return Ok(self);
+    }
+    // `reqwest` accepts an empty parse quietly, so a file that is not a
+    // certificate would otherwise become "trust added, nothing
+    // verified" — the same opaque failure the option exists to fix.
+    const BEGIN: &[u8] = b"-----BEGIN CERTIFICATE-----";
+    if !pem.windows(BEGIN.len()).any(|w| w == BEGIN) {
+      return Err(ConnectorError::Config(
+        "the trusted certificate is not a PEM certificate: no BEGIN \
+         CERTIFICATE block"
+          .to_owned(),
+      ));
+    }
+    self.roots.push(pem.to_vec());
+    self.client = client(&self.roots, self.accept_invalid)?;
+    Ok(self)
+  }
+
+  /// Stop verifying the server's certificate.
+  ///
+  /// A last resort, and never the default. Some appliances — a console
+  /// with a self-signed leaf it will not let you replace, and no CA to
+  /// pin — are unreachable any other way, and the alternative for an
+  /// operator is not "more secure", it is "no observability at all".
+  /// It can still reach exactly the allowlisted paths and still cannot
+  /// name a mutating method, so the read-only guarantee is untouched;
+  /// what is given up is knowing which host answered.
+  ///
+  /// Prefer [`Self::trusted`]: it trusts one certificate and keeps the
+  /// check. Reach for this only when there is no certificate to trust.
+  ///
+  /// # Errors
+  /// If the TLS stack cannot restart.
+  pub fn insecure(mut self) -> Result<Self, ConnectorError> {
+    self.accept_invalid = true;
+    self.client = client(&self.roots, true)?;
+    Ok(self)
   }
 
   /// The same client, allowlisting the same endpoints, but refusing to
@@ -318,6 +392,11 @@ impl RestrictedHttp {
     for (k, v) in query {
       url.query_pairs_mut().append_pair(k, v);
     }
+    // Report before the round trip, so the screen names what is in
+    // flight rather than what just finished.
+    self
+      .progress
+      .report(ProgressEvent::note(request_note(method, path, query)));
     self
       .send(self.client.request(method.to_reqwest(), url), path)
       .await
@@ -338,6 +417,11 @@ impl RestrictedHttp {
     form: &[(&str, String)],
   ) -> Result<serde_json::Value, ConnectorError> {
     let url = self.check(ReadMethod::Post, path)?;
+    self.progress.report(ProgressEvent::note(request_note(
+      ReadMethod::Post,
+      path,
+      form,
+    )));
     self.send(self.client.post(url).form(form), path).await
   }
 
@@ -383,7 +467,7 @@ impl RestrictedHttp {
     let resp = req
       .send()
       .await
-      .map_err(|e| ConnectorError::Transport(e.to_string()))?;
+      .map_err(|e| ConnectorError::Transport(causes(&e)))?;
 
     let status = resp.status();
     if !status.is_success() {
@@ -399,6 +483,20 @@ impl RestrictedHttp {
   }
 }
 
+/// One line naming a request, with the page number when the caller
+/// paged. Paging one endpoint repeats the same path, so the page is the
+/// part that says the read is moving.
+fn request_note(
+  method: ReadMethod,
+  path: &str,
+  query: &[(&str, String)],
+) -> String {
+  match query.iter().find(|(k, _)| *k == "page_num") {
+    Some((_, page)) => format!("{method} {path} (page {page})"),
+    None => format!("{method} {path}"),
+  }
+}
+
 impl fmt::Debug for RestrictedHttp {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     // The bearer token is deliberately absent: this type is logged.
@@ -406,8 +504,73 @@ impl fmt::Debug for RestrictedHttp {
       .field("base", &self.base.as_str())
       .field("allow", &self.allow.len())
       .field("offline", &self.offline)
+      .field("verify_tls", &!self.accept_invalid)
       .finish()
   }
+}
+
+/// Build a client honouring the given extra root certificates.
+///
+/// Each `roots` entry is a PEM bundle and *every* certificate in it is
+/// added. An appliance that presents a leaf plus its own intermediate
+/// CA (UniFi OS does) is the reason: a bundle parsed as one certificate
+/// would trust only whichever happened to be written first — usually
+/// the leaf — and verification then fails with the same `UnknownIssuer`
+/// the option exists to prevent.
+fn client(
+  roots: &[Vec<u8>],
+  accept_invalid: bool,
+) -> Result<reqwest::Client, ConnectorError> {
+  let mut builder = reqwest::Client::builder()
+    .user_agent(concat!("overlord/", env!("CARGO_PKG_VERSION")))
+    .timeout(std::time::Duration::from_secs(30))
+    .danger_accept_invalid_certs(accept_invalid);
+  for pem in roots {
+    for cert in parse_bundle(pem)? {
+      builder = builder.add_root_certificate(cert);
+    }
+  }
+  builder
+    .build()
+    .map_err(|e| ConnectorError::Config(e.to_string()))
+}
+
+/// Parse every certificate in a PEM bundle.
+///
+/// A single-certificate parse would trust only the first block, and a
+/// chain is printed leaf-first — so trusting "the certificate" would
+/// trust the one certificate that is not an issuer, and verification
+/// would fail with the same `UnknownIssuer` the option exists to fix.
+fn parse_bundle(
+  pem: &[u8],
+) -> Result<Vec<reqwest::Certificate>, ConnectorError> {
+  let certs = reqwest::Certificate::from_pem_bundle(pem)
+    .map_err(|e| ConnectorError::Config(format!("root certificate: {e}")))?;
+  if certs.is_empty() {
+    return Err(ConnectorError::Config(
+      "root certificate: the PEM contains no CERTIFICATE block".to_owned(),
+    ));
+  }
+  Ok(certs)
+}
+
+/// The full cause chain of a transport failure.
+///
+/// `reqwest::Error`'s own `Display` is only the outermost sentence —
+/// "error sending request for url (…)" — while the reason a connector
+/// actually failed (an untrusted certificate, a refused connection, a
+/// DNS failure) lives in its `source`. Walking the chain is what turns
+/// a coverage-view error from "it did not work" into something an
+/// operator can act on.
+fn causes(err: &dyn std::error::Error) -> String {
+  let mut out = err.to_string();
+  let mut source = std::error::Error::source(err);
+  while let Some(cause) = source {
+    out.push_str(": ");
+    out.push_str(&cause.to_string());
+    source = std::error::Error::source(cause);
+  }
+  out
 }
 
 #[cfg(test)]
@@ -448,6 +611,30 @@ mod tests {
     assert!(!h.permits(ReadMethod::Get, "/directory/v1/users/ada"));
     // The right path with a method the connector did not ask for.
     assert!(!h.permits(ReadMethod::Post, "/directory/v1/users"));
+  }
+
+  #[test]
+  fn a_request_note_names_the_page_when_there_is_one() {
+    assert_eq!(
+      request_note(ReadMethod::Get, "/directory/v1/users", &[]),
+      "GET /directory/v1/users"
+    );
+    let query = [
+      ("expand[]", "access_policy".to_owned()),
+      ("page_num", "2".to_owned()),
+    ];
+    assert_eq!(
+      request_note(ReadMethod::Get, "/directory/v1/users", &query),
+      "GET /directory/v1/users (page 2)"
+    );
+  }
+
+  #[test]
+  fn a_client_without_progress_reports_nothing() {
+    // The default carries no sink, so wiring one in is optional and a
+    // client used outside a watched sweep stays silent.
+    let h = http().with_progress(Progress::default());
+    assert!(!h.progress.is_active());
   }
 
   #[tokio::test]
@@ -527,5 +714,96 @@ mod tests {
     let p = PathPattern::new("directory/v1/users");
     assert!(p.matches("/directory/v1/users"));
     assert!(p.matches("directory/v1/users/"));
+  }
+
+  #[test]
+  fn a_bogus_root_certificate_is_refused_rather_than_ignored() {
+    let err = RestrictedHttp::new("https://example.test/", allowlist())
+      .unwrap()
+      .trusted(b"not a certificate")
+      .unwrap_err();
+    assert!(matches!(err, ConnectorError::Config(_)), "{err:?}");
+  }
+
+  /// A real certificate, so the bundle test exercises the parser rather
+  /// than an error path. Contents are immaterial; only that it parses.
+  const CERT: &str = "\
+-----BEGIN CERTIFICATE-----
+MIIDwzCCAqugAwIBAgIBATANBgkqhkiG9w0BAQsFADCBgjELMAkGA1UEBhMCREUx
+KzApBgNVBAoMIlQtU3lzdGVtcyBFbnRlcnByaXNlIFNlcnZpY2VzIEdtYkgxHzAd
+BgNVBAsMFlQtU3lzdGVtcyBUcnVzdCBDZW50ZXIxJTAjBgNVBAMMHFQtVGVsZVNl
+YyBHbG9iYWxSb290IENsYXNzIDIwHhcNMDgxMDAxMTA0MDE0WhcNMzMxMDAxMjM1
+OTU5WjCBgjELMAkGA1UEBhMCREUxKzApBgNVBAoMIlQtU3lzdGVtcyBFbnRlcnBy
+aXNlIFNlcnZpY2VzIEdtYkgxHzAdBgNVBAsMFlQtU3lzdGVtcyBUcnVzdCBDZW50
+ZXIxJTAjBgNVBAMMHFQtVGVsZVNlYyBHbG9iYWxSb290IENsYXNzIDIwggEiMA0G
+CSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQCqX9obX+hzkeXaXPSi5kfl82hVYAUd
+AqSzm1nzHoqvNK38DcLZSBnuaY/JIPwhqgcZ7bBcrGXHX+0CfHt8LRvWurmAwhiC
+FoT6ZrAIxlQjgeTNuUk/9k9uN0goOA/FvudocP05l03Sx5iRUKrERLMjfTlH6VJi
+1hKTXrcxlkIF+3anHqP1wvzpesVsqXFP6st4vGCvx9702cu+fjOlbpSD8DT6Iavq
+jnKgP6TeMFvvhk1qlVtDRKgQFRzlAVfFmPHmBiiRqiDFt1MmUUOyCxGVWOHAD3bZ
+wI18gfNycJ5v/hqO2V81xrJvNHy+SE/iWjnX2J14np+GPgNeGYtEotXHAgMBAAGj
+QjBAMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgEGMB0GA1UdDgQWBBS/
+WSA2AHmgoCJrjNXyYdK4LMuCSjANBgkqhkiG9w0BAQsFAAOCAQEAMQOiYQsfdOhy
+NsZt+U2e+iKo4YFWz827n+qrkRk4r6p8FU3ztqONpfSO9kSpp+ghla0+AGIWiPAC
+uvxhI+YzmzB6azZie60EI4RYZeLbK4rnJVM3YlNfvNoBYimipidx5joifsFvHZVw
+IEoHNN/q/xWA5brXethbdXwFeilHfkCoMRN3zUA7tFFHei4R40cR3p1m0IvVVGb6
+g1XqfMIpiRvpb7PO4gWEyS8+eIVibslfwXhjdFjASBgMmTnrpMwatXlajRWc2BQN
+9noHV8cigwUtPJslJj0Ys6lDfMjIq2SPDqO/nBudMNva0Bkuqjzx+zOAduTNrRlP
+BSeOE6Fuwg==
+-----END CERTIFICATE-----
+";
+
+  #[test]
+  fn every_certificate_in_a_bundle_is_trusted_not_just_the_first() {
+    // `s_client -showcerts` prints leaf first, so trusting one
+    // certificate trusts the only one that is not an issuer. UniFi OS
+    // sends a chain; so does anything with its own CA.
+    let one = parse_bundle(CERT.as_bytes()).unwrap();
+    assert_eq!(one.len(), 1);
+    let two = parse_bundle(format!("{CERT}{CERT}").as_bytes()).unwrap();
+    assert_eq!(two.len(), 2);
+  }
+
+  #[test]
+  fn an_insecure_client_says_so_in_its_debug() {
+    let h = RestrictedHttp::new("https://example.test/", allowlist())
+      .unwrap()
+      .insecure()
+      .unwrap();
+    let debug = format!("{h:?}");
+    assert!(debug.contains("verify_tls: false"), "{debug}");
+  }
+
+  #[test]
+  fn a_transport_failure_reports_its_whole_cause_chain() {
+    // `reqwest`'s own Display stops at "error sending request", which
+    // is exactly the sentence that made a self-signed console
+    // undiagnosable. The reason lives one level down.
+    #[derive(Debug)]
+    struct Outer;
+    #[derive(Debug)]
+    struct Inner;
+
+    impl fmt::Display for Outer {
+      fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("error sending request")
+      }
+    }
+    impl fmt::Display for Inner {
+      fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("invalid peer certificate: UnknownIssuer")
+      }
+    }
+    impl std::error::Error for Outer {
+      fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&Inner)
+      }
+    }
+    impl std::error::Error for Inner {}
+
+    assert_eq!(
+      causes(&Outer),
+      "error sending request: invalid peer certificate: UnknownIssuer"
+    );
   }
 }

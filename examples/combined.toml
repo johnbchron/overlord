@@ -1,0 +1,32 @@
+[store]
+path = "overlord.db"
+
+[sweep]
+absence_guard_pct = 10
+
+[server]
+bind = "127.0.0.1:3000"
+
+[[systems]]
+connector = "unifi-access"
+id = "access-main"
+
+[systems.config]
+base_url = "https://192.168.2.118:12445"
+
+credentials_env = "OVERLORD_UNIFI_ACCESS_TOKEN"
+tls_insecure = true
+
+groups = true
+
+[[systems]]
+connector = "google-workspace"
+id = "gws-prod"
+
+[systems.config]
+customer = "C014l3em6"
+impersonate = "jblewis@liveoakclassical.com"
+
+credentials_env = "OVERLORD_GWS_CREDENTIALS"
+
+groups = true

@@ -1,0 +1,33 @@
+{
+  "id": "unifi-access-default",
+  "version": "1",
+  "system_kind": "sso",
+  "entity_type": "user",
+  "entity_key": { "path": "user.id" },
+  "display_name": { "path": "user.full_name" },
+  "status": {
+    "when": [
+      { "path": "user.status", "map": { "DEACTIVATED": "deprovisioned" } },
+      { "path": "user.status", "map": { "PENDING": "invited" } },
+      { "path": "user.status", "map": { "ACTIVE": "active" } }
+    ],
+    "default": "unknown"
+  },
+  "fields": {
+    "email": { "path": "user.user_email", "as": "string" },
+    "username": { "path": "user.user_email", "as": "email_local" },
+    "employee_id": { "path": "user.employee_number", "as": "string" },
+    "phone": { "path": "user.phone", "as": "string" },
+    "alias": { "path": "user.alias", "as": "string" },
+    "email_status": { "path": "user.email_status", "as": "string" },
+    "onboard_time": { "path": "user.onboard_time", "as": "number" },
+    "has_pin": { "path": "has_pin", "as": "boolean" },
+    "nfc_cards": { "path": "user.nfc_cards", "as": "list" },
+    "license_plates": { "path": "user.license_plates", "as": "list" },
+    "touch_passes": { "path": "user.touch_pass", "as": "list" },
+    "access_policy_ids": { "path": "user.access_policy_ids", "as": "list" },
+    "access_policies": { "path": "user.access_policies", "as": "list" },
+    "doors": { "path": "doors", "as": "list" },
+    "groups": { "path": "groups", "as": "list" }
+  }
+}

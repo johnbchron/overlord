@@ -68,7 +68,11 @@ pub fn router(state: AppState) -> Router {
     // --- violations (home) --------------------------------------------
     .route("/", get(pages::violations::board))
     .route("/violations", get(pages::violations::board))
-    .route("/violations/rows", get(pages::violations::rows))
+    // The old fragment endpoint. It was what `hx-push-url` put in the
+    // address bar, so it is in browser histories and bookmarks already;
+    // pointing it at the page handler turns those into a screen rather
+    // than a bare table.
+    .route("/violations/rows", get(pages::violations::board))
     .route("/violation", get(pages::violations::detail))
     .route("/violations/act", post(actions::violation_action))
     // --- rules ---------------------------------------------------------
@@ -82,7 +86,8 @@ pub fn router(state: AppState) -> Router {
     .route("/rules/disable", post(actions::check_disable))
     // --- users and detail ----------------------------------------------
     .route("/users", get(pages::users::list))
-    .route("/users/results", get(pages::users::results))
+    // As `/violations/rows` above: a URL earlier versions pushed.
+    .route("/users/results", get(pages::users::list))
     .route("/person", get(pages::subject::person))
     .route("/entity", get(pages::subject::entity))
     // --- identity (SPEC.md section 12) ---------------------------------

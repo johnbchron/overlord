@@ -113,3 +113,17 @@ pub fn head(title: &str, lede: &str, actions: Markup) -> Markup {
 pub fn empty(message: &str) -> Markup {
   html! { div class="empty" { (message) } }
 }
+
+/// Whether htmx issued this request rather than the browser navigating.
+///
+/// A screen whose filters carry `hx-push-url` has to answer both, at the
+/// same URL: the fragment when htmx swaps it into the page, and the
+/// whole screen when the browser asks for that URL directly — a reload,
+/// a shared link, or a back-button entry htmx's history cache has
+/// evicted. A URL that is pushed into the address bar but only ever
+/// answers with a fragment turns the screen into its own results table
+/// the moment it is loaded rather than swapped.
+#[must_use]
+pub fn is_htmx(headers: &axum::http::HeaderMap) -> bool {
+  headers.contains_key("hx-request")
+}

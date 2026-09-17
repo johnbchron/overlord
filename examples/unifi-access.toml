@@ -1,0 +1,85 @@
+# A real UniFi Access console, read-only.
+#
+#   OVERLORD_UNIFI_ACCESS_TOKEN=… \
+#     cargo run -- -c examples/unifi-access.toml sweep
+#
+# Before the first sweep, generate an API token on the console under
+#
+#   Access → Settings → General → Advanced → API Token
+#
+# The token is a bearer credential and comes from the environment,
+# never from this file (SPEC.md section 14). It is the whole of what
+# overlord can do to the console: overlord reads four endpoints — users,
+# doors, user groups, and one group's members — and cannot name a
+# mutating HTTP method at all.
+#
+# The console serves the Access API on port 12445 with a certificate no
+# public root vouches for, so the first sweep fails with "invalid peer
+# certificate: UnknownIssuer" until it is dealt with. Two options:
+#
+#   ca_cert      trust the console's CA. Preferred: verification stays
+#                on. Only works if the console sends its CA, or you can
+#                get it from the console.
+#   tls_insecure stop verifying. Last resort for a console whose
+#                self-signed leaf rustls will not accept as an anchor
+#                and which offers no CA to pin. Logs a warning each
+#                sweep. It still cannot write anything; what it gives up
+#                is knowing which host answered.
+#
+# To see what the console actually sends:
+#
+#   openssl s_client -showcerts -connect 192.168.1.1:12445 </dev/null \
+#     2>/dev/null | grep -E "s:|i:|BEGIN CERTIFICATE"
+
+[store]
+path = "overlord.db"
+
+[sweep]
+absence_guard_pct = 10
+
+[server]
+bind = "127.0.0.1:8080"
+
+[[systems]]
+connector = "unifi-access"
+id = "access-hq"
+
+[systems.config]
+# The console's address and the Access API port. This is the address a
+# fresh console ships with; change it to your own.
+base_url = "https://192.168.1.1:12445"
+
+# The environment variable holding the API token. Never the token
+# itself: SPEC.md section 14 keeps secrets out of this file and out of
+# the streams.
+credentials_env = "OVERLORD_UNIFI_ACCESS_TOKEN"
+
+# Group membership is one API call per group. Turning it off makes a
+# sweep of a group-heavy console faster, at the cost of an overlay that
+# cannot answer a group question at all.
+groups = true
+
+# The console's CA certificate chain, as a PEM file. Every certificate
+# in the file is trusted, so capture the whole chain when the console
+# sends one. If `openssl s_client -showcerts` prints a single block and
+# verification still fails, the console sent only a leaf it will not let
+# you replace; use tls_insecure below instead.
+#
+# ca_cert = "/etc/overlord/unifi-access-ca.pem"
+
+# Stop verifying the console's certificate. Off by default. Set this
+# only when ca_cert has no usable certificate to trust.
+#
+# tls_insecure = true
+
+# Authentication for the operator UI (SPEC.md section 14). The client
+# secret comes from OVERLORD_OIDC_CLIENT_SECRET and never from here.
+# Without `allowed_subjects` or `required_group`, overlord refuses to
+# start: authentication alone is not sufficient.
+#
+# [auth]
+# issuer           = "https://id.example.com"
+# client_id        = "overlord"
+# redirect_url     = "https://overlord.example.com/auth/callback"
+# allowed_subjects = ["you@example.com"]
+# required_group   = "secops"

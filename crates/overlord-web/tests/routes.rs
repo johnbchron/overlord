@@ -17,11 +17,12 @@ use axum::{
 use overlord_connect::Registry;
 use overlord_connector_fixture::FixtureConnector;
 use overlord_core::{
-  Actor, CheckDraft, CheckId, Revision, Severity, SubjectKind, SystemId,
-  Timestamp,
+  Actor, CheckDraft, CheckId, CommandKind, EntityKey, EntityRef, EntityStatus,
+  EntityType, NewCommand, NormalizedRecord, PersonUid, Revision, Severity,
+  SubjectKind, SystemId, Timestamp,
 };
 use overlord_engine::{SweepPlan, SystemConfig, checks, run_sweep};
-use overlord_store::Db;
+use overlord_store::{Db, NewFact, SweepStart, SweepStatus};
 use overlord_web::{
   AppState, auth::AuthMode, oidc::Oidc, sweeprun::SweepRunner,
 };
@@ -185,6 +186,23 @@ async fn page(state: &AppState, uri: &str) -> String {
   body(response).await
 }
 
+/// A GET as htmx makes one. The `HX-Request` header is the whole of what
+/// tells a screen to answer with its fragment rather than its page, so a
+/// test that swaps fragments has to send it.
+async fn fragment(state: &AppState, uri: &str) -> String {
+  let response = request(
+    state,
+    Request::builder()
+      .uri(uri)
+      .header("hx-request", "true")
+      .body(Body::empty())
+      .unwrap(),
+  )
+  .await;
+  assert_eq!(response.status(), StatusCode::OK, "GET {uri} (htmx)");
+  body(response).await
+}
+
 // --- the screens --------------------------------------------------------
 
 #[tokio::test]
@@ -235,7 +253,7 @@ async fn the_board_ranks_worst_first_and_folds_the_quiet_tiers() {
 async fn the_board_filters_narrow_the_query_not_the_page() {
   let state = seeded().await;
 
-  let critical = page(&state, "/violations/rows?severity=critical").await;
+  let critical = fragment(&state, "/violations?severity=critical").await;
   assert!(critical.contains("sev-critical"));
   assert!(
     !critical.contains("sev-medium"),
@@ -246,14 +264,14 @@ async fn the_board_filters_narrow_the_query_not_the_page() {
   assert!(!critical.contains("<html"), "a fragment must not be a page");
   assert!(!critical.contains("masthead"));
 
-  let searched = page(&state, "/violations/rows?q=svc-deploy").await;
+  let searched = fragment(&state, "/violations?q=svc-deploy").await;
   assert!(searched.contains("svc-deploy@example.com"));
   assert!(
     !searched.contains("ada@example.com"),
     "the subject search must actually narrow"
   );
 
-  let nothing = page(&state, "/violations/rows?q=nobody-by-that-name").await;
+  let nothing = fragment(&state, "/violations?q=nobody-by-that-name").await;
   assert!(
     nothing.contains("Nothing matches those filters"),
     "an empty filtered board must not read as \"nothing is wrong\""
@@ -1022,4 +1040,149 @@ async fn the_users_screen_ranks_risk_first_and_clean_accounts_last() {
       .await
       .contains("Ada Lovelace")
   );
+}
+
+/// A roster big enough for its own limit to bite. Every account is
+/// unlinked except one confirmed person, who sorts last: the row an
+/// operator asking for confirmed persons is looking for, and the row a
+/// filter applied after the limit would never reach.
+async fn crowded() -> AppState {
+  let db = Arc::new(Db::open_memory().unwrap());
+  let now = ts(NOW);
+  let start = db
+    .write(|w| {
+      w.open_sweep(&SweepStart {
+        started_at:        now,
+        requested:         vec![SystemId::new("gws-prod")],
+        pinned_checks:     vec![],
+        pinned_norm:       vec![],
+        absence_guard_pct: 10,
+      })
+    })
+    .unwrap();
+
+  let mut facts: Vec<NewFact> = (0..260)
+    .map(|i| account(&format!("aaa-{i:03}@x.com"), now))
+    .collect();
+  facts.push(account("zzz-linked@x.com", now));
+  db.write(|w| w.append_facts(start, &facts)).unwrap();
+  db.write(|w| w.commit_sweep(start, SweepStatus::Ok, now))
+    .unwrap();
+
+  db.write(|w| {
+    w.append_command(&NewCommand::new(
+      Actor::new("cli:test"),
+      CommandKind::PersonLink {
+        person_uid:      PersonUid::new("P-zoe"),
+        entity:          EntityRef::new("gws-prod", "user", "zzz-linked@x.com"),
+        from_suggestion: None,
+      },
+      now,
+    ))
+  })
+  .unwrap();
+
+  let registry = Arc::new(Registry::new().with(FixtureConnector::boxed()));
+  state_for(db, registry, Vec::new(), AuthMode::Dev {
+    actor: "tester".to_owned(),
+  })
+}
+
+fn account(key: &str, at: Timestamp) -> NewFact {
+  let mut n = NormalizedRecord::new(
+    "gws-prod",
+    overlord_core::SystemKind::Workspace,
+    "user",
+    key,
+    EntityStatus::Active,
+  );
+  n.display_name = Some(key.to_owned());
+  NewFact {
+    system:       SystemId::new("gws-prod"),
+    entity_type:  EntityType::new("user"),
+    entity_key:   EntityKey::new(key),
+    observed_at:  at,
+    raw:          None,
+    normalized:   Some(n),
+    norm_version: "fixture/1".to_owned(),
+  }
+}
+
+#[tokio::test]
+async fn the_confirmed_filter_reaches_a_person_the_roster_limit_cuts_off() {
+  let state = crowded().await;
+
+  // Unfiltered, the person is past the cut and the screen says the list
+  // was cut rather than presenting 200 rows as everybody.
+  let everyone = page(&state, "/users/results").await;
+  assert!(!everyone.contains("P-zoe"), "{everyone}");
+  assert!(everyone.contains("The first 200"), "{everyone}");
+
+  // Filtered, there is one confirmed person and the limit has nothing
+  // to cut. Before, the filter ran over the worst 200 subjects and this
+  // screen was empty.
+  let confirmed = page(&state, "/users/results?kind=confirmed").await;
+  // A linked person carries no display name of its own until one is
+  // given, so it is listed by uid.
+  assert!(confirmed.contains("P-zoe"), "{confirmed}");
+  assert!(!confirmed.contains("Nobody here yet"), "{confirmed}");
+  assert!(!confirmed.contains("The first 200"), "{confirmed}");
+  assert!(!confirmed.contains("aaa-000@x.com"), "{confirmed}");
+
+  // The other half is still capped, because there really are more.
+  let unlinked = page(&state, "/users/results?kind=implicit").await;
+  assert!(unlinked.contains("The first 200"), "{unlinked}");
+  assert!(!unlinked.contains("P-zoe"), "{unlinked}");
+  assert!(!unlinked.contains("zzz-linked@x.com"), "{unlinked}");
+}
+
+/// `hx-push-url` puts the URL htmx *fetched* into the address bar, so a
+/// screen whose filters push must answer that same URL with a whole page
+/// when the browser asks for it directly. When the filters fetched a
+/// fragment-only endpoint, the address bar ended up holding one — and
+/// the next reload, shared link, or back-button entry htmx's history
+/// cache had dropped rendered the results table as the entire document.
+#[tokio::test]
+async fn a_pushed_filter_url_loads_as_a_page_and_swaps_as_a_fragment() {
+  let state = seeded().await;
+
+  for uri in [
+    "/users?kind=confirmed",
+    "/violations?severity=critical",
+    // The endpoints earlier versions pushed are still routed, because
+    // they are in browser histories already.
+    "/users/results?kind=confirmed",
+    "/violations/rows?severity=critical",
+  ] {
+    let loaded = page(&state, uri).await;
+    assert!(
+      loaded.contains("<html"),
+      "GET {uri} must be a page:\n{loaded}"
+    );
+    assert!(loaded.contains("masthead"), "GET {uri} lost its nav");
+  }
+
+  // The same URLs the filters fetch, with htmx's header: the fragment
+  // alone, which is what `hx-target` expects to swap in.
+  for uri in ["/users?kind=confirmed", "/violations?severity=critical"] {
+    let swapped = fragment(&state, uri).await;
+    assert!(
+      !swapped.contains("<html"),
+      "htmx GET {uri} must be a fragment:\n{swapped}"
+    );
+    assert!(
+      !swapped.contains("masthead"),
+      "htmx GET {uri} carried the nav"
+    );
+  }
+
+  // And the form fetches the page URL, not a fragment endpoint — which
+  // is what makes the pushed URL the page's own.
+  let users = page(&state, "/users").await;
+  assert!(users.contains(r#"hx-get="/users""#), "{users}");
+  assert!(!users.contains("/users/results"), "{users}");
+
+  let board = page(&state, "/violations").await;
+  assert!(board.contains(r#"hx-get="/violations""#), "{board}");
+  assert!(!board.contains("/violations/rows"), "{board}");
 }

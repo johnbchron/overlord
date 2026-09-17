@@ -5,6 +5,7 @@ use crate::{
   error::ConnectorError,
   http::{Allow, RestrictedHttp},
   normalize::Ruleset,
+  progress::Progress,
 };
 
 /// One observed object, before normalization.
@@ -68,6 +69,9 @@ pub struct ObserveCtx {
   /// This system's entry from the configuration file. Credentials come
   /// from the environment, never from here and never from the streams.
   pub config:     serde_json::Value,
+  /// Where the connector narrates its progress. Inert unless a sweep is
+  /// being watched; see [`crate::progress`].
+  pub progress:   Progress,
 }
 
 /// A read-only adapter for one system kind (SPEC.md section 11).
@@ -110,6 +114,25 @@ pub trait Connector: Send + Sync {
     ctx: &ObserveCtx,
   ) -> Result<Snapshot, ConnectorError>;
 
+  /// Additional root certificates (PEM) this connector needs to reach a
+  /// system whose certificate is signed by a private CA.
+  ///
+  /// Empty by default, which is right for every vendor on the public
+  /// web. A self-hosted appliance is the case this exists for: its
+  /// console presents a certificate no public root vouches for, and the
+  /// only safe answer is to trust that one CA rather than to turn
+  /// verification off. Takes the context because the certificate is
+  /// per-system configuration.
+  ///
+  /// # Errors
+  /// If the configured certificate cannot be read.
+  fn root_certificates(
+    &self,
+    _ctx: &ObserveCtx,
+  ) -> Result<Vec<Vec<u8>>, ConnectorError> {
+    Ok(Vec::new())
+  }
+
   /// Build the client this connector is allowed to use.
   ///
   /// Provided, not overridable in practice: the allowlist passed to the
@@ -118,8 +141,28 @@ pub trait Connector: Send + Sync {
   /// # Errors
   /// If the base URL is invalid or the TLS stack cannot start.
   fn http(&self, ctx: &ObserveCtx) -> Result<RestrictedHttp, ConnectorError> {
-    RestrictedHttp::new(&self.base_url(ctx), self.allowlist())
+    let mut http = RestrictedHttp::new(&self.base_url(ctx), self.allowlist())?
+      .with_progress(ctx.progress.clone());
+    for pem in self.root_certificates(ctx)? {
+      http = http.trusted(&pem)?;
+    }
+    if self.accept_invalid_certificates(ctx) {
+      http = http.insecure()?;
+    }
+    Ok(http)
   }
+
+  /// Whether to stop verifying the server's certificate for this
+  /// system. `false` unless a connector explicitly opts in, and
+  /// [`Self::root_certificates`] is always the better answer when there
+  /// is a certificate to trust.
+  ///
+  /// It exists for the appliance that presents a self-signed leaf
+  /// rustls will not accept as an anchor and offers no CA to pin. The
+  /// read-only guarantee does not depend on it — the allowlist and
+  /// `ReadMethod` still bound every request — but an operator who turns
+  /// it on has given up knowing which host answered.
+  fn accept_invalid_certificates(&self, _ctx: &ObserveCtx) -> bool { false }
 
   /// Build a client for one of the secondary origins this connector
   /// declared with [`Allow::at`] — a token endpoint, or a sibling API on

@@ -6,7 +6,9 @@ use overlord_core::{
   EntityType, NewCommand, NormalizedRecord, PersonUid, Revision, Severity,
   SubjectKind, SweepId, SystemId, SystemKind, Timestamp, Value,
 };
-use overlord_store::{Db, NewFact, SweepStart, SweepStatus, error::StoreError};
+use overlord_store::{
+  Db, NewFact, SubjectFilter, SweepStart, SweepStatus, error::StoreError,
+};
 
 const T0: &str = "2026-01-15T00:00:00Z";
 const T1: &str = "2026-01-16T00:00:00Z";
@@ -561,7 +563,9 @@ fn every_collected_account_is_listed_even_with_nothing_against_it() {
   // empty — and the roster still has to hold both, exactly once each.
   assert!(db.read(|r| r.top_subjects(50)).unwrap().is_empty());
 
-  let rows = db.read(|r| r.all_subjects(50)).unwrap();
+  let rows = db
+    .read(|r| r.all_subjects(SubjectFilter::Everyone, 50))
+    .unwrap();
   let uids: Vec<&str> = rows.iter().map(|r| r.person_uid.as_str()).collect();
   assert_eq!(uids, vec!["implicit:gws-prod/user/ada@x.com", "P"]);
 
@@ -585,7 +589,12 @@ fn a_departed_account_leaves_the_roster() {
   .unwrap();
   db.write(|w| w.commit_sweep(s, SweepStatus::Ok, ts(T0)))
     .unwrap();
-  assert_eq!(db.read(|r| r.all_subjects(50)).unwrap().len(), 1);
+  assert_eq!(
+    db.read(|r| r.all_subjects(SubjectFilter::Everyone, 50))
+      .unwrap()
+      .len(),
+    1
+  );
 
   // A tombstone makes the entity absent, and an absent account is not
   // somebody evaluation still judges (SPEC.md section 6.4).
@@ -605,5 +614,100 @@ fn a_departed_account_leaves_the_roster() {
   db.write(|w| w.commit_sweep(s, SweepStatus::Ok, ts(T1)))
     .unwrap();
 
-  assert!(db.read(|r| r.all_subjects(50)).unwrap().is_empty());
+  assert!(
+    db.read(|r| r.all_subjects(SubjectFilter::Everyone, 50))
+      .unwrap()
+      .is_empty()
+  );
+}
+
+#[test]
+fn a_filtered_roster_is_cut_by_the_limit_after_the_filter_not_before() {
+  // The two kinds are ranked together, so a caller that read the worst
+  // N subjects and kept the confirmed ones among them would answer
+  // "the confirmed persons inside the worst N" — and with enough
+  // unlinked accounts above them, that is nobody at all.
+  let db = db();
+  let s = sweep(&db, T0);
+
+  let mut facts = Vec::new();
+  for i in 0..8 {
+    // `aaa-…` so these sort ahead of the persons below, as a console
+    // full of unlinked accounts does when nothing scores.
+    facts.push(user_fact(
+      &format!("aaa-{i}@x.com"),
+      EntityStatus::Active,
+      true,
+    ));
+  }
+  for i in 0..3 {
+    facts.push(user_fact(
+      &format!("zzz-{i}@x.com"),
+      EntityStatus::Active,
+      true,
+    ));
+  }
+  db.write(|w| w.append_facts(s, &facts)).unwrap();
+  db.write(|w| w.commit_sweep(s, SweepStatus::Ok, ts(T0)))
+    .unwrap();
+
+  for i in 0..3 {
+    db.write(|w| {
+      w.append_command(&cmd(
+        CommandKind::PersonLink {
+          person_uid:      PersonUid::new(format!("P-{i}")),
+          entity:          EntityRef::new(
+            "gws-prod",
+            "user",
+            format!("zzz-{i}@x.com"),
+          ),
+          from_suggestion: None,
+        },
+        T0,
+      ))
+    })
+    .unwrap();
+  }
+
+  // Eleven subjects: eight unlinked accounts, then three persons.
+  let everyone = db
+    .read(|r| r.all_subjects(SubjectFilter::Everyone, 50))
+    .unwrap();
+  assert_eq!(everyone.len(), 11);
+  assert!(everyone[..8].iter().all(|r| r.implicit), "{everyone:?}");
+
+  // Filtering the other way round is the bug this holds closed: the
+  // worst five subjects are all unlinked, so keeping the confirmed ones
+  // among them finds nobody.
+  assert_eq!(
+    db.read(|r| r.all_subjects(SubjectFilter::Everyone, 5))
+      .unwrap()
+      .iter()
+      .filter(|r| !r.implicit)
+      .count(),
+    0
+  );
+
+  // A limit smaller than the unlinked half must not cost the roster a
+  // single confirmed person.
+  let confirmed = db
+    .read(|r| r.all_subjects(SubjectFilter::Confirmed, 5))
+    .unwrap();
+  assert_eq!(confirmed.len(), 3, "{confirmed:?}");
+  assert!(confirmed.iter().all(|r| !r.implicit), "{confirmed:?}");
+
+  let unlinked = db
+    .read(|r| r.all_subjects(SubjectFilter::Unlinked, 50))
+    .unwrap();
+  assert_eq!(unlinked.len(), 8);
+  assert!(unlinked.iter().all(|r| r.implicit), "{unlinked:?}");
+
+  // The limit still bounds what comes back, having been applied to the
+  // roster that was asked for.
+  assert_eq!(
+    db.read(|r| r.all_subjects(SubjectFilter::Unlinked, 5))
+      .unwrap()
+      .len(),
+    5
+  );
 }

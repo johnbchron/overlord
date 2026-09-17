@@ -9,11 +9,12 @@
 
 use axum::{
   extract::{Query, State},
+  http::HeaderMap,
   response::{Html, IntoResponse, Response},
 };
 use maud::{Markup, html};
 use overlord_core::SubjectRef;
-use overlord_store::ScoreRow;
+use overlord_store::{ScoreRow, SubjectFilter};
 use serde::Deserialize;
 
 use crate::{
@@ -24,6 +25,12 @@ use crate::{
   view,
 };
 
+/// How many subjects the roster shows at once. The cap is on the
+/// filtered roster, not on the roster it was filtered from, and the
+/// screen says so when it bites — a list silently cut at its limit is
+/// the same thing as a list missing people.
+const ROSTER_LIMIT: usize = 200;
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct UsersQuery {
   #[serde(default)]
@@ -33,12 +40,36 @@ pub struct UsersQuery {
   pub kind: String,
 }
 
+impl UsersQuery {
+  /// The roster this asks for. Unrecognised values mean everyone: a
+  /// hand-edited query string should show more than it asked for, never
+  /// less.
+  fn filter(&self) -> SubjectFilter {
+    match self.kind.as_str() {
+      "confirmed" => SubjectFilter::Confirmed,
+      "implicit" => SubjectFilter::Unlinked,
+      _ => SubjectFilter::Everyone,
+    }
+  }
+}
+
 pub async fn list(
   identity: Identity,
   State(state): State<AppState>,
+  headers: HeaderMap,
   Query(query): Query<UsersQuery>,
 ) -> Result<Response> {
   let body = body(&state, &query)?;
+
+  // The filters push this URL into the address bar, so it has to answer
+  // both questions: the results table when htmx is swapping it in, and
+  // the whole screen when the browser loads it — which is what happens
+  // on a reload, on a shared link, and on a back-button entry htmx's
+  // cache no longer holds.
+  if layout::is_htmx(&headers) {
+    return Ok(Html(body.into_string()).into_response());
+  }
+
   let content = html! {
     (layout::head(
       "Users",
@@ -50,7 +81,7 @@ pub async fn list(
     ))
 
     form class="filters"
-         hx-get="/users/results"
+         hx-get="/users"
          hx-target="#results"
          hx-push-url="true"
          hx-trigger="change, search, keyup changed delay:300ms from:find input[name='q']" {
@@ -83,15 +114,6 @@ pub async fn list(
     )
     .into_response(),
   )
-}
-
-/// The htmx fragment.
-pub async fn results(
-  _identity: Identity,
-  State(state): State<AppState>,
-  Query(query): Query<UsersQuery>,
-) -> Result<Response> {
-  Ok(Html(body(&state, &query)?.into_string()).into_response())
 }
 
 fn body(state: &AppState, query: &UsersQuery) -> Result<Markup> {
@@ -133,16 +155,18 @@ fn body(state: &AppState, query: &UsersQuery) -> Result<Markup> {
   // clean record missing from this list is indistinguishable from an
   // account overlord never collected, and the first thing an operator
   // does after a sweep is look for somebody they know is there.
-  let rows: Vec<ScoreRow> = state
+  //
+  // The filter is the query's, not this function's: the two kinds are
+  // interleaved by score, so keeping the confirmed rows out of the worst
+  // 200 subjects would answer a different question — and answer it
+  // short, dropping every confirmed person ranked below the cut. One
+  // extra row is asked for so the screen can tell a full page from a
+  // truncated one.
+  let mut rows: Vec<ScoreRow> = state
     .db
-    .read(|r| r.all_subjects(200))?
-    .into_iter()
-    .filter(|r| match query.kind.as_str() {
-      "confirmed" => !r.implicit,
-      "implicit" => r.implicit,
-      _ => true,
-    })
-    .collect();
+    .read(|r| r.all_subjects(query.filter(), ROSTER_LIMIT + 1))?;
+  let truncated = rows.len() > ROSTER_LIMIT;
+  rows.truncate(ROSTER_LIMIT);
 
   Ok(html! {
     div class="panel" {
@@ -198,6 +222,12 @@ fn body(state: &AppState, query: &UsersQuery) -> Result<Markup> {
                 }
               }
             }
+          }
+        }
+        @if truncated {
+          p class="hint" {
+            "The first " (ROSTER_LIMIT) ", worst first. Search by name, \
+             email or key to reach somebody further down."
           }
         }
       }

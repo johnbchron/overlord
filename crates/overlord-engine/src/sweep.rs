@@ -5,9 +5,11 @@
 //! revisions and normalization versions it will use, runs each
 //! connector's read-only `observe`, appends facts, and evaluates.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 
-use overlord_connect::{Connector, ObserveCtx, Registry, Ruleset};
+use overlord_connect::{
+  Connector, ObserveCtx, Progress, ProgressEvent, Registry, Ruleset,
+};
 use overlord_core::{
   Actor, Completeness, EntityKey, EntityRef, EntityType, SystemId, SystemKind,
   Timestamp,
@@ -90,6 +92,44 @@ pub struct SweepOutcome {
   pub warnings:   Vec<String>,
 }
 
+/// A step in a sweep, reported as it happens.
+///
+/// A sweep can run longer than an operator's patience, so the engine
+/// narrates its phases rather than only returning at the end. A caller
+/// that does not care passes a no-op sink via [`run_sweep`]; the web
+/// runner folds these into the Sweeps screen.
+#[derive(Debug, Clone)]
+pub enum SweepProgress {
+  /// The sweep row is open, so the run has an identity to report under.
+  Opened {
+    sweep:   overlord_core::SweepId,
+    systems: usize,
+  },
+  /// Collection of one system is beginning. `index` is one-based.
+  SystemStarted {
+    system: SystemId,
+    index:  usize,
+    total:  usize,
+  },
+  /// One system finished and its coverage row is recorded.
+  SystemFinished {
+    system: SystemId,
+    index:  usize,
+    total:  usize,
+  },
+  /// A step reported from inside one connector's read — a page fetched,
+  /// a group walked. `done`/`total` are present when the connector can
+  /// count the work.
+  Detail {
+    system: SystemId,
+    note:   String,
+    done:   Option<u64>,
+    total:  Option<u64>,
+  },
+  /// Every system is in; evaluation is running.
+  Evaluating { systems: usize },
+}
+
 /// Run a sweep end to end.
 ///
 /// # Errors
@@ -103,7 +143,33 @@ pub async fn run_sweep(
   registry: &Registry,
   plan: &SweepPlan,
 ) -> Result<SweepOutcome> {
+  run_sweep_with_progress(db, registry, plan, |_| {}).await
+}
+
+/// Run a sweep, reporting each phase to `progress` as it happens.
+///
+/// Each system's coverage row is written the moment that system
+/// finishes, rather than once the whole run does, so a screen that polls
+/// the store sees the table fill in. The callback is for what the store
+/// cannot yet know: which system is in flight, and that evaluation has
+/// begun.
+///
+/// # Errors
+/// As [`run_sweep`].
+pub async fn run_sweep_with_progress<F>(
+  db: &Db,
+  registry: &Registry,
+  plan: &SweepPlan,
+  progress: F,
+) -> Result<SweepOutcome>
+where
+  F: Fn(SweepProgress) + Send + Sync + 'static,
+{
   let started_at = plan.started_at;
+  // Shared so each system can be handed a `Progress` that forwards to
+  // it; the sink inside `Progress` must be `'static` and `Sync`, which
+  // is why the bound is tightened here.
+  let progress = Arc::new(progress);
 
   // Pin what this run will use, before anything is read. An edit made
   // while the sweep runs lands in the stream but does not reach this
@@ -128,6 +194,7 @@ pub async fn run_sweep(
       system: sys.id.clone(),
       started_at,
       config: sys.config.clone(),
+      progress: system_progress(&progress, &sys.id),
     };
     let ruleset = connector.default_ruleset(&ctx);
     prepared.push((sys, ctx, ruleset));
@@ -149,25 +216,43 @@ pub async fn run_sweep(
     systems = plan.systems.len(),
     "sweep opened"
   );
+  progress(SweepProgress::Opened {
+    sweep,
+    systems: prepared.len(),
+  });
 
+  let total = prepared.len();
   let mut outcomes = Vec::new();
   let mut warnings = Vec::new();
 
-  for (sys, ctx, ruleset) in &prepared {
+  for (index, (sys, ctx, ruleset)) in prepared.iter().enumerate() {
+    progress(SweepProgress::SystemStarted {
+      system: sys.id.clone(),
+      index: index + 1,
+      total,
+    });
     let connector = registry
       .get(&sys.connector)
       .ok_or_else(|| EngineError::UnknownConnector(sys.connector.clone()))?;
     let (outcome, mut system_warnings) =
       sweep_one(db, connector, ruleset, sys, ctx, sweep, plan).await?;
+    // Record this system before moving to the next, so the coverage
+    // table is a live record of the run rather than a postmortem.
+    db.write(|w| w.record_system(sweep, &outcome))?;
+    progress(SweepProgress::SystemFinished {
+      system: outcome.system.clone(),
+      index: index + 1,
+      total,
+    });
     warnings.append(&mut system_warnings);
     outcomes.push(outcome);
   }
 
+  progress(SweepProgress::Evaluating {
+    systems: outcomes.len(),
+  });
   let status = overall_status(&outcomes);
   let evaluation = db.write(|w| -> Result<_> {
-    for o in &outcomes {
-      w.record_system(sweep, o)?;
-    }
     w.commit_sweep(sweep, status, Timestamp::now())?;
     evaluate_sweep(w, sweep)
   })?;
@@ -179,6 +264,24 @@ pub async fn run_sweep(
     evaluation,
     warnings,
   })
+}
+
+/// A per-system [`Progress`] that forwards each connector report to the
+/// run's sink, tagged with the system it came from.
+fn system_progress<F>(progress: &Arc<F>, system: &SystemId) -> Progress
+where
+  F: Fn(SweepProgress) + Send + Sync + 'static,
+{
+  let progress = Arc::clone(progress);
+  let system = system.clone();
+  Progress::new(Arc::new(move |event: ProgressEvent| {
+    progress(SweepProgress::Detail {
+      system: system.clone(),
+      note:   event.note,
+      done:   event.done,
+      total:  event.total,
+    });
+  }))
 }
 
 fn overall_status(outcomes: &[SystemOutcome]) -> SweepStatus {
@@ -359,3 +462,51 @@ pub fn describe_allowlist(connector: &dyn Connector) -> Vec<String> {
 /// Re-exported so callers need not depend on the connect crate directly
 /// to spell an entity.
 pub type Ref = (SystemId, EntityType, EntityKey, SystemKind);
+
+#[cfg(test)]
+mod tests {
+  use std::sync::Mutex;
+
+  use super::*;
+
+  #[test]
+  fn a_connector_report_arrives_tagged_with_its_system() {
+    let seen: Arc<Mutex<Vec<SweepProgress>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let run = Arc::new(move |p: SweepProgress| sink.lock().unwrap().push(p));
+
+    let progress = system_progress(&run, &SystemId::new("access-hq"));
+    progress.counted("group 2 of 9", 2, Some(9));
+
+    let seen = seen.lock().unwrap();
+    match &seen[0] {
+      SweepProgress::Detail {
+        system,
+        note,
+        done,
+        total,
+      } => {
+        assert_eq!(system.as_str(), "access-hq");
+        assert_eq!(note, "group 2 of 9");
+        assert_eq!(*done, Some(2));
+        assert_eq!(*total, Some(9));
+      }
+      other => panic!("expected a detail event, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn an_inert_progress_sends_nothing() {
+    let seen: Arc<Mutex<Vec<SweepProgress>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let run = Arc::new(move |p: SweepProgress| sink.lock().unwrap().push(p));
+
+    // The default `Progress` has no sink; reporting through it must not
+    // reach the run.
+    Progress::default().say("nobody is listening");
+    assert!(seen.lock().unwrap().is_empty());
+    // And the run's own sink still works, proving the closure is live.
+    run(SweepProgress::Evaluating { systems: 0 });
+    assert_eq!(seen.lock().unwrap().len(), 1);
+  }
+}

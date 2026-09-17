@@ -1697,6 +1697,7 @@ dependencies = [
  "overlord-connect",
  "overlord-connector-fixture",
  "overlord-connector-gworkspace",
+ "overlord-connector-unifi-access",
  "overlord-core",
  "overlord-engine",
  "overlord-expr",
@@ -1743,6 +1744,20 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "jsonwebtoken",
+ "overlord-connect",
+ "overlord-core",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
+name = "overlord-connector-unifi-access"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
  "overlord-connect",
  "overlord-core",
  "serde",

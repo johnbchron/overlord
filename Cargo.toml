@@ -15,6 +15,7 @@ overlord-store = { path = "crates/overlord-store" }
 overlord-connect = { path = "crates/overlord-connect" }
 overlord-connector-fixture = { path = "crates/overlord-connector-fixture" }
 overlord-connector-gworkspace = { path = "crates/overlord-connector-gworkspace" }
+overlord-connector-unifi-access = { path = "crates/overlord-connector-unifi-access" }
 overlord-engine = { path = "crates/overlord-engine" }
 overlord-web = { path = "crates/overlord-web" }
 

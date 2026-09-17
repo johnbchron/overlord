@@ -174,6 +174,7 @@ mod tests {
       system:     SystemId::new("fix"),
       started_at: "2026-01-15T00:00:00Z".parse::<Timestamp>().unwrap(),
       config:     serde_json::json!({ "path": path, "stage": stage }),
+      progress:   overlord_connect::Progress::default(),
     }
   }
 

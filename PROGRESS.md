@@ -4,7 +4,8 @@ Working log for the build described in [PLAN.md](PLAN.md). Updated as work
 lands, not in advance. Spec references like (§7) point at
 [SPEC.md](SPEC.md); plan references at PLAN.md.
 
-**Current milestone:** M4 — Breadth. Google Workspace (task 24) complete.
+**Current milestone:** M4 — Breadth. Google Workspace (task 24) complete;
+the access/SSO half of task 26 (a UniFi Access connector) landed.
 
 ---
 
@@ -46,10 +47,10 @@ lands, not in advance. Spec references like (§7) point at
 | --- | --- | --- |
 | 24 | `overlord-connector-gworkspace` | done |
 | 25 | IdP connector (Okta, then Entra ID) | not started |
-| 26 | Access/SSO assignments, then MDM | not started |
+| 26 | Access/SSO assignments, then MDM | part done — UniFi Access landed |
 | 27 | Per-connector normalization rulesets, authored as commands | not started |
 
-`cargo test --workspace`: **272 passing, 0 failing.**
+`cargo test --workspace`: **301 passing, 0 failing.**
 `cargo clippy --workspace --all-targets -- -D warnings`: **clean.**
 `cargo fmt --all -- --check`: **clean.**
 
@@ -237,11 +238,22 @@ paths must produce identical projections.
 - **Assets are hashed at startup** from their own bytes
   (`assets.rs`), served immutable, and 404 on a stale path. There is no
   build step and nothing to invalidate.
-- **The sweep row is the progress record.** `sweeprun::SweepRunner` holds
-  only what the store cannot answer: whether a task is in flight before
-  it has opened its row, and why the last one died if it died before
-  recording anything. The page polls `/sweeps/progress`, which stops
-  polling by returning markup with no trigger and an `HX-Refresh`.
+- **The sweep row is the progress record, and each system's coverage row
+  is written as that system finishes.** `sweeprun::SweepRunner` holds only
+  what the store cannot answer: which system is in flight, how many are
+  done, whether evaluation has begun, the tail of what that system is
+  reading (folded from the engine's `SweepProgress` sink), and why the
+  last run died if it died before recording anything. The page polls
+  `/sweeps/progress`, which shows a bar, the system being collected, a
+  live feed of the connector's own reports, and the coverage table as it
+  fills in, then stops polling by returning markup with no trigger and an
+  `HX-Refresh`.
+- **A connector narrates through `overlord_connect::Progress`**, carried
+  on `ObserveCtx` and forwarded by the engine as `SweepProgress::Detail`.
+  It is inert without a sink, so a connector reports unconditionally.
+  `RestrictedHttp` reports every request on its own, which means even a
+  connector that says nothing shows the pages and calls it is making —
+  the difference between a hung sweep and a slow one.
 - **Two sweeps at once are refused, not queued.** They would interleave
   facts under two different definitions of "now" (§10).
 - **`view.rs` is the shared vocabulary** — severity, state, timestamps,
@@ -1091,4 +1103,91 @@ each entry was asked for. `describe_allowlist` had been written in M1 and
 marked "unused today"; a real connector is what made it worth showing.
 
 `cargo test --workspace`: 272 passing. `clippy -D warnings` and
+`fmt --check`: clean.
+
+### 2026-09-17 — M4: the UniFi Access connector (task 26, access half)
+
+`overlord-connector-unifi-access`, read-only against Ubiquiti's Access
+developer API. This is the third crate through the connector pattern
+(`api.rs` for the reads, `lib.rs` for the trait impl and the envelope,
+`ruleset.json` for the shipped normalization, two test files) and the
+first with nothing new to add to `overlord-connect` — which is the
+useful signal: the seams the Workspace connector grew are the right
+shape for a vendor that shares none of its semantics.
+
+**It reports `SystemKind::Sso`.** §11 categorises this connector as
+"access and SSO applications", and `sso` is the kind the spec's four
+names give that category. Adding a fifth kind for door access would put
+one vendor's vocabulary into core; scoping `entity("sso")` to reach the
+access system is consistent with how the category is defined.
+
+**Four GETs and no way to write.** Accounts (`expand[]=access_policy`
+folds each user's entitlements in), doors (to name a policy's
+resources), user groups, and one group's members. Unlocking a door is a
+`PUT`, which `ReadMethod` cannot name; the credential and policy
+collection endpoints are `GET`s that the allowlist refuses.
+
+**A self-hosted console needed two new seams, one safe and one blunt.**
+`reqwest` under the workspace's `rustls-tls` trusts the public roots and
+nothing else, so a console serving `:12445` with its own CA is
+unreachable — and the host's trust store would not have helped. The fix
+is `Connector::root_certificates`, defaulting to empty, plus
+`RestrictedHttp::trusted(pem)`: a connector names the CA it needs and
+verification stays on. `ca_cert` in the systems config points at the
+PEM, because a certificate is per-system configuration; a typo in the
+path is a config error rather than an empty trust. The PEM is parsed as
+a **bundle** and every certificate in it is trusted — `s_client
+-showcerts` prints leaf first, and a single-certificate parse trusts the
+one certificate that is not an issuer, which reproduces `UnknownIssuer`
+exactly. That was the first cut's bug;
+`every_certificate_in_a_bundle_is_trusted_not_just_the_first` holds it
+closed.
+
+Some consoles defeat even that: they send a self-signed leaf `rustls`
+will not accept as a trust anchor and no CA to pin, so there is no
+certificate to name. The blunt seam is `RestrictedHttp::insecure()` via
+`Connector::accept_invalid_certificates`, off by default and warned
+about each sweep. The read-only guarantee does not depend on TLS — the
+allowlist and `ReadMethod` bound every request either way — so what it
+gives up is knowing which host answered, and for a LAN appliance whose
+alternative is no observability at all, that is a trade an operator
+gets to make. `Debug` reports `verify_tls` so it is visible in a log.
+
+**The transport error now reports its cause.** `ConnectorError::Transport`
+used `reqwest::Error`'s own `Display`, which stops at "error sending
+request for url (…)" — the sentence that made this undiagnosable. It now
+walks the `source` chain, so the same failure reads "…: invalid peer
+certificate: UnknownIssuer". A one-line change that would have answered
+the question directly.
+
+**Issued door credentials are stripped, not stored.** A user payload
+carries `pin_code.token` and each `nfc_cards[].token`. Those are secrets
+an operator issues, and §2 keeps the fact stream forever in a plaintext
+SQLite file, so the envelope drops every token before observation —
+keeping the card's id and type, and a `has_pin` boolean for the PIN.
+Nothing else is altered. This is a deliberate departure from "store the
+raw payload verbatim" and it only applies to credential material; a
+test asserts neither token reaches a fact.
+
+**Entitlement is derived, not guessed.** `doors` is the union of a
+user's policies' resources, resolved against the door list for names.
+`groups` is absent when not collected and `[]` when collected and
+empty, and a failed group or door read makes the snapshot `Partial` for
+the same reason it does in Workspace: a half-read overlay must not
+resolve every entitlement violation at once.
+
+**Tests.** 17 new: the shipped ruleset mapping the identity signals and
+all three console lifecycle states; redaction asserted on the envelope
+and again end to end; door derivation; the allowlist refusing a
+single-user read, the credential collection and the policies endpoint;
+wiremock reads across two pages, a failed group read degrading to
+partial, and a failed first page reported as a failed system rather
+than a partial one; a bogus CA PEM refused rather than silently trusted;
+a named CA that cannot be read treated as a config error; no `ca_cert`
+meaning no extra roots; verification on unless `tls_insecure` is set,
+and `Debug` reporting `verify_tls`; every certificate in a bundle
+trusted rather than only the first; and the transport error's cause
+chain.
+
+`cargo test --workspace`: 289 passing. `clippy -D warnings` and
 `fmt --check`: clean.

@@ -621,6 +621,7 @@ mod tests {
       system: SystemId::new("gws-prod"),
       started_at: "2026-01-15T00:00:00Z".parse::<Timestamp>().unwrap(),
       config,
+      progress: overlord_connect::Progress::default(),
     }
   }
 

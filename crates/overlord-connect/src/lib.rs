@@ -10,6 +10,7 @@ pub mod connector;
 pub mod error;
 pub mod http;
 pub mod normalize;
+pub mod progress;
 
 pub use connector::{Connector, Observation, ObserveCtx, Registry, Snapshot};
 pub use error::ConnectorError;
@@ -17,3 +18,4 @@ pub use http::{Allow, PathPattern, ReadMethod, RestrictedHttp};
 pub use normalize::{
   Coerce, FieldRule, Normalized, Ruleset, StatusClause, StatusRule,
 };
+pub use progress::{Progress, ProgressEvent};

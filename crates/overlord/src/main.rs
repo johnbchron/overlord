@@ -14,6 +14,7 @@ use clap::{Parser, Subcommand};
 use overlord_connect::Registry;
 use overlord_connector_fixture::FixtureConnector;
 use overlord_connector_gworkspace::GoogleWorkspaceConnector;
+use overlord_connector_unifi_access::UnifiAccessConnector;
 use overlord_core::{
   Actor, CheckDraft, CheckId, CommandKind, EntityRef, NewCommand, PersonUid,
   SubjectRef, SuppressReason, SystemId, Timestamp, ViolationState,
@@ -346,6 +347,7 @@ fn registry() -> Registry {
   Registry::new()
     .with(FixtureConnector::boxed())
     .with(GoogleWorkspaceConnector::boxed())
+    .with(UnifiAccessConnector::boxed())
 }
 
 fn append(

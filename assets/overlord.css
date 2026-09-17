@@ -727,6 +727,46 @@ pre {
   background: color-mix(in srgb, var(--ok-bg) 60%, transparent);
 }
 
+/* A running sweep's progress bar. The filled width is written inline
+ * from the share of systems recorded; the track keeps its height so the
+ * layout does not jump as systems finish. */
+.progress {
+  height: 0.4rem;
+  margin: 0 0 0.5rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line-strong) 45%, transparent);
+  overflow: hidden;
+}
+.progress > i {
+  display: block;
+  height: 100%;
+  background: var(--warn);
+  border-radius: inherit;
+  transition: width 0.3s ease;
+}
+
+/* The tail of what a connector is doing right now — one page or group
+ * per line. A bounded, scrolling box so a long read cannot push the
+ * page around as lines arrive. */
+.feed {
+  margin: 0 0 1rem;
+  padding: 0.4rem 0.65rem;
+  max-height: 9rem;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  line-height: 1.55;
+  color: var(--ink-soft);
+}
+.feed > div + div {
+  margin-top: 0.15rem;
+  padding-top: 0.15rem;
+  border-top: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+}
+
 /* --- misc --------------------------------------------------------------- */
 
 .muted {

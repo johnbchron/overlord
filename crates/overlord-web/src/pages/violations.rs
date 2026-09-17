@@ -8,6 +8,7 @@
 
 use axum::{
   extract::{Query, State},
+  http::HeaderMap,
   response::{Html, IntoResponse, Response},
 };
 use maud::{Markup, html};
@@ -111,20 +112,29 @@ impl BoardQuery {
   }
 }
 
-/// The full page.
+/// The board: the whole screen, or just its rows when htmx asks.
+///
+/// One handler for both because the filters push this URL into the
+/// address bar. A pushed URL that only ever answers with a fragment
+/// replaces the screen with its own table the next time it is loaded
+/// rather than swapped — on a reload, a shared link, or a back-button
+/// entry htmx's history cache has evicted.
 pub async fn board(
   identity: Identity,
   State(state): State<AppState>,
+  headers: HeaderMap,
   Query(query): Query<BoardQuery>,
 ) -> Result<Response> {
   let filter = query.to_filter()?;
-  let (rows, checks, systems, counts) = state.db.read(|r| -> Result<_> {
-    Ok((
-      r.violations_where(&filter)?,
-      r.checks()?,
-      r.known_systems()?,
-      r.counts()?,
-    ))
+  let rows = state.db.read(|r| r.violations_where(&filter))?;
+
+  if layout::is_htmx(&headers) {
+    return Ok(Html(table(&rows, &query).into_string()).into_response());
+  }
+
+  // Only the full page needs the facet vocabularies and the tiles.
+  let (checks, systems, counts) = state.db.read(|r| -> Result<_> {
+    Ok((r.checks()?, r.known_systems()?, r.counts()?))
   })?;
 
   let content = html! {
@@ -148,7 +158,7 @@ pub async fn board(
     }
 
     form class="filters"
-         hx-get="/violations/rows"
+         hx-get="/violations"
          hx-target="#board"
          hx-push-url="true"
          hx-trigger="change, search, keyup changed delay:300ms from:find input[name='q']" {
@@ -224,17 +234,6 @@ pub async fn board(
     )
     .into_response(),
   )
-}
-
-/// The htmx fragment: just the board, re-rendered under new filters.
-pub async fn rows(
-  _identity: Identity,
-  State(state): State<AppState>,
-  Query(query): Query<BoardQuery>,
-) -> Result<Response> {
-  let filter = query.to_filter()?;
-  let rows = state.db.read(|r| r.violations_where(&filter))?;
-  Ok(Html(table(&rows, &query).into_string()).into_response())
 }
 
 /// The board itself: the new section, the loud tiers, and the quiet ones

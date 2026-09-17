@@ -18,5 +18,8 @@ pub use error::{EngineError, Result};
 pub use evaluate::{EvalReport, evaluate_sweep};
 pub use identity::recompute_suggestions;
 pub use rebuild::rebuild;
-pub use sweep::{SweepOutcome, SweepPlan, SystemConfig, run_sweep};
+pub use sweep::{
+  SweepOutcome, SweepPlan, SweepProgress, SystemConfig, run_sweep,
+  run_sweep_with_progress,
+};
 pub use world::World;

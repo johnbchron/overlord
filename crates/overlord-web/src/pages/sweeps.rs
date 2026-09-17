@@ -19,7 +19,7 @@ use crate::{
   auth::Identity,
   error::{Result, WebError},
   layout::{self, Section},
-  sweeprun::RunState,
+  sweeprun::{RunProgress, RunState},
   view,
 };
 
@@ -62,8 +62,8 @@ pub async fn list(
           }
           div class="shrink" {
             button class="primary" type="submit"
-                   disabled[run_state == RunState::Running] {
-              @if run_state == RunState::Running {
+                   disabled[run_state.running()] {
+              @if run_state.running() {
                 "Running…"
               } @else {
                 "Run a sweep"
@@ -76,7 +76,7 @@ pub async fn list(
 
     div id="progress"
         hx-get="/sweeps/progress"
-        hx-trigger=(if run_state == RunState::Running {
+        hx-trigger=(if run_state.running() {
           "load, every 2s"
         } else {
           "none"
@@ -140,7 +140,7 @@ pub async fn progress(
   let body = progress_body(&run_state, latest.first());
 
   let mut response = Html(body.into_string()).into_response();
-  if run_state != RunState::Running {
+  if !run_state.running() {
     // The run has finished, so the page behind the fragment is now
     // stale — the Runs table, the counts, the board. Reload once rather
     // than teaching every region to poll.
@@ -155,12 +155,25 @@ pub async fn progress(
 fn progress_body(run_state: &RunState, latest: Option<&SweepRow>) -> Markup {
   html! {
     @match run_state {
-      RunState::Running => {
+      RunState::Running(run) => {
         div class="banner banner-warn" {
           "A sweep is running."
           @if let Some(s) = latest {
             @if s.running() {
               " Sweep " (s.id) " started " (view::when(s.started_at)) "."
+            }
+          }
+        }
+        @if run.total > 0 {
+          div class="progress" title=(progress_line(run)) {
+            i style=(format!("width: {}%", run.percent())) {}
+          }
+        }
+        div class="soft" { (progress_line(run)) }
+        @if !run.notes.is_empty() {
+          div class="feed" {
+            @for line in &run.notes {
+              div { (line) }
             }
           }
         }
@@ -178,6 +191,22 @@ fn progress_body(run_state: &RunState, latest: Option<&SweepRow>) -> Markup {
       RunState::Idle => {},
     }
   }
+}
+
+/// The one line under the bar: what is being collected right now, or
+/// that every system is in and the evaluator has the floor.
+fn progress_line(run: &RunProgress) -> String {
+  if run.evaluating {
+    return format!("All {} systems collected; evaluating checks…", run.total);
+  }
+  if let Some(system) = &run.current {
+    return format!(
+      "Collecting {system} ({} of {})…",
+      run.finished + 1,
+      run.total
+    );
+  }
+  format!("Starting {} systems…", run.total)
 }
 
 #[derive(Debug, Deserialize)]
