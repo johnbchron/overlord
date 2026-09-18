@@ -13,7 +13,10 @@ use crate::error::{Result, StoreError};
 
 /// Applied in order; each one is immutable once released.
 fn migrations() -> Migrations<'static> {
-  Migrations::new(vec![M::up(include_str!("sql/0001_initial.sql"))])
+  Migrations::new(vec![
+    M::up(include_str!("sql/0001_initial.sql")),
+    M::up(include_str!("sql/0002_system_connector.sql")),
+  ])
 }
 
 /// The store handle.

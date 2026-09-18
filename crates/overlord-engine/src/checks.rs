@@ -5,15 +5,18 @@
 //! needs the expression compiler; the store enforces the invariants only
 //! it can see, such as refusing to enable a revision with no dry-run.
 
+use std::collections::BTreeSet;
+
 use overlord_core::{
   Actor, CheckDraft, CheckId, CheckRecord, CommandKind, DryrunSample,
-  NewCommand, Revision, SubjectKind, SubjectRef, Timestamp,
+  EntityRef, NewCommand, Revision, SubjectKind, SubjectRef, Timestamp,
 };
 use overlord_expr::{EvalCtx, Schema, Tri, compile, eval};
 use overlord_store::Db;
 
 use crate::{
   error::{EngineError, Result},
+  evaluate,
   world::World,
 };
 
@@ -74,6 +77,13 @@ pub struct DryRun {
   pub check_id:    CheckId,
   pub revision:    Revision,
   pub match_count: u64,
+  /// How many subjects the check's scope admitted at all.
+  ///
+  /// The denominator `match_count` needs: without it, "0 would match"
+  /// reads as "nothing is wrong" when it may mean "this rule selects
+  /// nobody". A scope naming a system that does not exist is a typo, not
+  /// a clean bill of health.
+  pub in_scope:    u64,
   pub samples:     Vec<DryrunSample>,
   /// Subjects the condition could not be answered for.
   pub errors:      Vec<String>,
@@ -105,12 +115,14 @@ pub fn dry_run(
   // dry-run answers "what would the next sweep see", not "what would a
   // sweep at this exact instant see". With no sweep yet, the wall clock
   // is all there is.
-  let (world, now) = db.read(|r| -> Result<_> {
+  let (world, now, pending) = db.read(|r| -> Result<_> {
     let now = match r.latest_sweep()? {
       Some(s) => r.sweep_started_at(s)?,
       None => at,
     };
-    Ok((World::load(r)?, now))
+    let pending: BTreeSet<EntityRef> =
+      r.entities_with_pending_suggestions()?.into_iter().collect();
+    Ok((World::load(r)?, now, pending))
   })?;
 
   let ctx = EvalCtx::at(now);
@@ -118,22 +130,44 @@ pub fn dry_run(
     check_id: check_id.clone(),
     revision,
     match_count: 0,
+    in_scope: 0,
     samples: Vec::new(),
     errors: Vec::new(),
   };
 
+  // Exactly the subjects a sweep would evaluate, chosen by the sweep's
+  // own predicates. A dry-run that counted every subject in the world
+  // overstated a scoped check — it reported matches for accounts the
+  // sweep would never look at, so a rule could dry-run full and then
+  // open nothing, with nothing on either screen to explain it.
+  //
+  // The one filter deliberately not applied is the sweep's "skip
+  // systems this run did not cover": a dry-run has no run to speak of,
+  // and answers for the full sweep that `enable` is a prelude to.
+  let skip_pending = |refs: &[EntityRef]| {
+    draft.suppress_if_pending_links && refs.iter().any(|e| pending.contains(e))
+  };
   let subjects: Vec<SubjectRef> = match draft.applies_to {
     SubjectKind::Entity => world
       .entity_refs()
       .into_iter()
+      .filter(|e| {
+        evaluate::entity_in_scope(&draft, e, &world)
+          && !skip_pending(std::slice::from_ref(e))
+      })
       .map(SubjectRef::Entity)
       .collect(),
     SubjectKind::Person => world
       .person_uids()
       .into_iter()
+      .filter(|p| {
+        evaluate::person_in_scope(&draft, p, &world)
+          && !skip_pending(&world.member_refs(p))
+      })
       .map(SubjectRef::Person)
       .collect(),
   };
+  out.in_scope = subjects.len() as u64;
 
   for subject in subjects {
     let evaluation = match &subject {

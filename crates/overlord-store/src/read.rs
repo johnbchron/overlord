@@ -1048,6 +1048,41 @@ impl Reader<'_> {
     }
     Ok(out)
   }
+
+  /// The connector each system was last read through.
+  ///
+  /// Answers `connector:` scope selectors without reaching for the
+  /// configuration file, which evaluation cannot see and a replay would
+  /// not have. The *latest* sweep wins, so a system moved from one
+  /// connector to another is scoped by the one reading it now rather
+  /// than by every connector that ever did.
+  ///
+  /// A system swept only before the connector was recorded is absent
+  /// from the map, and a connector selector matches nothing for it until
+  /// its next sweep.
+  ///
+  /// # Errors
+  /// On a SQLite failure.
+  pub fn system_connectors(
+    &self,
+  ) -> Result<std::collections::BTreeMap<SystemId, String>> {
+    let mut stmt = self.conn().prepare(
+      "SELECT system, connector FROM sweep_system s
+        WHERE connector IS NOT NULL
+          AND sweep_id = (SELECT max(sweep_id) FROM sweep_system t
+                           WHERE t.system = s.system
+                             AND t.connector IS NOT NULL)",
+    )?;
+    let rows = stmt.query_map([], |r| {
+      Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+    })?;
+    let mut out = std::collections::BTreeMap::new();
+    for row in rows {
+      let (system, connector) = row?;
+      out.insert(SystemId::new(system), connector);
+    }
+    Ok(out)
+  }
 }
 
 impl Reader<'_> {

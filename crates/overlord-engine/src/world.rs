@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 
 use overlord_core::{
-  EntityRef, PersonUid, SubjectKind, SystemKind, SystemSelector,
+  EntityRef, PersonUid, SubjectKind, SystemId, SystemKind, SystemSelector,
 };
 use overlord_expr::{EntityAttrs, Primary, Subject};
 use overlord_store::Reader;
@@ -17,12 +17,17 @@ use crate::error::Result;
 /// Every entity and person in scope for one evaluation pass.
 #[derive(Debug, Default)]
 pub struct World {
-  entities:  Vec<EntityAttrs>,
-  by_ref:    BTreeMap<EntityRef, usize>,
+  entities:   Vec<EntityAttrs>,
+  /// The connector each system was last read through, for a
+  /// `connector:` scope selector. Read from the projections rather than
+  /// from the configuration file: evaluation runs inside the sweep and
+  /// replays from the streams, neither of which can see a TOML file.
+  connectors: BTreeMap<SystemId, String>,
+  by_ref:     BTreeMap<EntityRef, usize>,
   /// Members of each person, confirmed or implicit.
-  members:   BTreeMap<PersonUid, Vec<usize>>,
+  members:    BTreeMap<PersonUid, Vec<usize>>,
   /// Operator-designated primaries, keyed by person and system kind.
-  primaries: BTreeMap<(PersonUid, SystemKind), usize>,
+  primaries:  BTreeMap<(PersonUid, SystemKind), usize>,
 }
 
 impl World {
@@ -37,7 +42,10 @@ impl World {
   /// # Errors
   /// On a store failure.
   pub fn load(r: &Reader<'_>) -> Result<Self> {
-    let mut w = Self::default();
+    let mut w = Self {
+      connectors: r.system_connectors()?,
+      ..Self::default()
+    };
 
     for state in r.entity_states(None)? {
       let idx = w.entities.len();
@@ -92,6 +100,14 @@ impl World {
   #[must_use]
   pub fn attrs(&self, entity: &EntityRef) -> Option<&EntityAttrs> {
     self.by_ref.get(entity).map(|&i| &self.entities[i])
+  }
+
+  /// The connector a system was last read through, for a `connector:`
+  /// selector. `None` for a system swept only before connectors were
+  /// recorded, which no connector selector matches.
+  #[must_use]
+  pub fn connector(&self, system: &SystemId) -> Option<&str> {
+    self.connectors.get(system).map(String::as_str)
   }
 
   #[must_use]
@@ -177,7 +193,7 @@ impl PersonSubject<'_> {
       .copied()
       .filter(|&i| {
         let n = &self.world.entities[i].normalized;
-        sel.matches(&n.system, n.system_kind)
+        sel.matches(&n.system, n.system_kind, self.world.connector(&n.system))
       })
       .collect()
   }

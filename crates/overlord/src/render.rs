@@ -195,9 +195,14 @@ pub fn checks(
 
 pub fn dry_run(run: &overlord_engine::checks::DryRun) {
   println!(
-    "{} revision {}: {} would match",
-    run.check_id, run.revision, run.match_count
+    "{} revision {}: {} of {} subjects in scope would match",
+    run.check_id, run.revision, run.match_count, run.in_scope
   );
+  if run.in_scope == 0 {
+    println!(
+      "  nothing is in scope: check the check's systems and entity types"
+    );
+  }
   for sample in &run.samples {
     let subject = match &sample.subject {
       SubjectRef::Entity(e) => format!("{}/{}", e.system, e.entity_key),

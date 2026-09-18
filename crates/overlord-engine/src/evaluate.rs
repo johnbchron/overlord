@@ -158,7 +158,7 @@ pub fn evaluate_sweep(w: &Writer<'_>, sweep: SweepId) -> Result<EvalReport> {
         // answering — the alternative is a board that goes blank during
         // a partial sweep — but it is marked rather than silently
         // trusted (SPEC.md section 10).
-        let stale = references_unswept(program, &known, &swept);
+        let stale = references_unswept(program, &known, &swept, &world);
 
         for uid in world.person_uids() {
           if !person_in_scope(draft, &uid, &world) {
@@ -421,7 +421,13 @@ fn reconcile(
   Ok(())
 }
 
-fn entity_in_scope(
+/// Whether a check's scope admits this entity.
+///
+/// Shared with [`crate::checks::dry_run`] rather than reimplemented
+/// there: a dry-run that selected its subjects differently from the
+/// sweep would answer a different question than the one the operator
+/// reads it as, which is exactly what it exists to prevent.
+pub(crate) fn entity_in_scope(
   draft: &CheckDraft,
   entity: &EntityRef,
   world: &World,
@@ -437,16 +443,23 @@ fn entity_in_scope(
   let Some(attrs) = world.attrs(entity) else {
     return false;
   };
-  draft
-    .systems
-    .iter()
-    .any(|s| s.matches(&entity.system, attrs.normalized.system_kind))
+  draft.systems.iter().any(|s| {
+    s.matches(
+      &entity.system,
+      attrs.normalized.system_kind,
+      world.connector(&entity.system),
+    )
+  })
 }
 
 /// A person is in scope when it holds at least one entity the check's
 /// scope admits. An unrestricted check admits every person, including
 /// the implicit singletons.
-fn person_in_scope(draft: &CheckDraft, uid: &PersonUid, world: &World) -> bool {
+pub(crate) fn person_in_scope(
+  draft: &CheckDraft,
+  uid: &PersonUid,
+  world: &World,
+) -> bool {
   if draft.systems.is_empty() && draft.entity_types.is_empty() {
     return true;
   }
@@ -462,10 +475,11 @@ fn references_unswept(
   program: &Program,
   known: &[(SystemId, SystemKind)],
   swept: &BTreeSet<SystemId>,
+  world: &World,
 ) -> bool {
   program.selectors().iter().any(|sel| {
-    known
-      .iter()
-      .any(|(id, kind)| sel.matches(id, *kind) && !swept.contains(id))
+    known.iter().any(|(id, kind)| {
+      sel.matches(id, *kind, world.connector(id)) && !swept.contains(id)
+    })
   })
 }

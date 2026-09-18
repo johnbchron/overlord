@@ -939,3 +939,184 @@ async fn nothing_is_new_in_a_system_that_has_never_been_swept() {
     "no system has a benchmark to compare against yet"
   );
 }
+
+// --- scoping a check to a connector ------------------------------------
+
+/// A connector is the third answer to "which systems", and the one the
+/// other two cannot give: a kind is every system of that category, an id
+/// is one system, and neither says "every console this adapter reads".
+#[tokio::test]
+async fn a_check_can_be_scoped_to_the_connector_that_read_the_system() {
+  let db = Db::open_memory().unwrap();
+  let systems = vec![
+    system("gws-prod", "baseline.json", 0),
+    system("okta-prod", "idp.json", 0),
+  ];
+  sweep(&db, &plan(systems.clone(), NOW)).await;
+
+  let mut scoped = mfa_missing();
+  scoped.id = CheckId::new("mfa-missing-fixture");
+  scoped.systems = vec!["connector:fixture".parse().unwrap()];
+  install(&db, &scoped);
+
+  let mut elsewhere = mfa_missing();
+  elsewhere.id = CheckId::new("mfa-missing-elsewhere");
+  elsewhere.systems = vec!["connector:unifi-access".parse().unwrap()];
+  install(&db, &elsewhere);
+
+  let out = sweep(&db, &plan(systems, "2026-02-02T00:00:00Z")).await;
+  assert!(
+    out.evaluation.errors.is_empty(),
+    "{:?}",
+    out.evaluation.errors
+  );
+
+  let open = db
+    .read(|r| r.violations(&[ViolationState::Open], 500))
+    .unwrap()
+    .into_iter()
+    .filter(|v| v.check_id.as_str().starts_with("mfa-missing-"))
+    .collect::<Vec<_>>();
+
+  // Both systems are read by `fixture`, so the scoped check behaves
+  // exactly like an unscoped one.
+  assert!(
+    open
+      .iter()
+      .any(|v| v.check_id.as_str() == "mfa-missing-fixture"),
+    "{open:?}"
+  );
+  // And nothing is read by `unifi-access`, so that check selects nobody
+  // rather than everybody.
+  assert!(
+    !open
+      .iter()
+      .any(|v| v.check_id.as_str() == "mfa-missing-elsewhere"),
+    "{open:?}"
+  );
+}
+
+/// The same selector inside a condition, which is where "does this
+/// person hold an account on any console of this kind" gets asked.
+#[tokio::test]
+async fn a_connector_selector_works_inside_a_condition_too() {
+  let db = Db::open_memory().unwrap();
+  let systems = vec![system("gws-prod", "baseline.json", 0)];
+  sweep(&db, &plan(systems.clone(), NOW)).await;
+
+  let holds = draft(
+    "held-by-fixture",
+    "has_entity(\"connector:fixture\")",
+    Severity::Low,
+    SubjectKind::Person,
+  );
+  install(&db, &holds);
+
+  let missing = draft(
+    "held-by-unifi",
+    "has_entity(\"connector:unifi-access\")",
+    Severity::Low,
+    SubjectKind::Person,
+  );
+  install(&db, &missing);
+
+  let out = sweep(&db, &plan(systems, "2026-02-02T00:00:00Z")).await;
+  assert!(
+    out.evaluation.errors.is_empty(),
+    "{:?}",
+    out.evaluation.errors
+  );
+
+  let open = db
+    .read(|r| r.violations(&[ViolationState::Open], 500))
+    .unwrap();
+  assert!(
+    open
+      .iter()
+      .any(|v| v.check_id.as_str() == "held-by-fixture"),
+    "{open:?}"
+  );
+  assert!(
+    !open.iter().any(|v| v.check_id.as_str() == "held-by-unifi"),
+    "{open:?}"
+  );
+}
+
+// --- a dry-run answers the sweep's question -----------------------------
+
+/// The count an operator reads before enabling has to be the count the
+/// sweep will act on. It was not: the dry-run evaluated every subject in
+/// the world while the sweep applies the check's scope, so a rule scoped
+/// to nothing dry-ran full and then opened nothing, with no screen
+/// explaining the gap.
+#[tokio::test]
+async fn a_dry_run_counts_only_the_subjects_a_sweep_would_evaluate() {
+  let db = Db::open_memory().unwrap();
+  let systems = vec![system("gws-prod", "baseline.json", 0)];
+  sweep(&db, &plan(systems.clone(), NOW)).await;
+
+  let mut scoped = mfa_missing();
+  scoped.id = CheckId::new("mfa-missing-elsewhere");
+  scoped.systems = vec!["okta-prod".parse().unwrap()];
+
+  let rev = checks::upsert(&db, &actor(), &scoped, ts(NOW), None).unwrap();
+  let dry = checks::dry_run(&db, &actor(), &scoped.id, rev, ts(NOW)).unwrap();
+  assert_eq!(dry.in_scope, 0, "no gws-prod account is an okta-prod one");
+  assert_eq!(dry.match_count, 0);
+
+  // And the sweep agrees, which is the whole point.
+  checks::enable(&db, &actor(), &scoped.id, ts(NOW)).unwrap();
+  let out = sweep(&db, &plan(systems.clone(), "2026-02-02T00:00:00Z")).await;
+  assert_eq!(out.evaluation.opened, 0, "{:?}", out.evaluation);
+
+  // Unscoped, the same rule matches — so the zero above is the scope,
+  // not the condition.
+  let mut open = mfa_missing();
+  open.id = CheckId::new("mfa-missing-anywhere");
+  let rev = checks::upsert(&db, &actor(), &open, ts(NOW), None).unwrap();
+  let dry = checks::dry_run(&db, &actor(), &open.id, rev, ts(NOW)).unwrap();
+  assert!(dry.in_scope > 0, "{dry:?}");
+  assert!(dry.match_count > 0, "{dry:?}");
+
+  checks::enable(&db, &actor(), &open.id, ts(NOW)).unwrap();
+  let out = sweep(&db, &plan(systems, "2026-02-03T00:00:00Z")).await;
+  assert_eq!(
+    out.evaluation.opened as u64, dry.match_count,
+    "the dry-run count is what the sweep opens"
+  );
+}
+
+/// `suppress_if_pending_links` is a skip the sweep applies and the
+/// dry-run did not, so a check written to stay quiet until identity work
+/// is done still predicted noise.
+#[tokio::test]
+async fn a_dry_run_honours_suppress_if_pending_links() {
+  let db = Db::open_memory().unwrap();
+  let systems = vec![
+    system("gws-prod", "identity-ws.json", 0),
+    system("okta-prod", "identity-idp.json", 0),
+  ];
+  sweep(&db, &plan(systems, NOW)).await;
+
+  let mut d = draft(
+    "everyone",
+    "entity_type == \"user\"",
+    Severity::Low,
+    SubjectKind::Entity,
+  );
+  let rev = checks::upsert(&db, &actor(), &d, ts(NOW), None).unwrap();
+  let loud = checks::dry_run(&db, &actor(), &d.id, rev, ts(NOW)).unwrap();
+
+  d.id = CheckId::new("everyone-quiet");
+  d.suppress_if_pending_links = true;
+  let rev = checks::upsert(&db, &actor(), &d, ts(NOW), None).unwrap();
+  let quiet = checks::dry_run(&db, &actor(), &d.id, rev, ts(NOW)).unwrap();
+
+  // The fixtures propose links, so the quiet check has fewer subjects
+  // to answer for — exactly as the sweep would.
+  assert!(
+    quiet.in_scope < loud.in_scope,
+    "pending links must narrow the dry-run: {quiet:?} vs {loud:?}"
+  );
+  assert!(quiet.match_count < loud.match_count, "{quiet:?}");
+}

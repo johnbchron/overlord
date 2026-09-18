@@ -323,6 +323,7 @@ async fn sweep_one(
   let failed = |err: &dyn std::fmt::Display, at: Timestamp| SystemOutcome {
     system:         sys.id.clone(),
     system_kind:    ruleset.system_kind,
+    connector:      connector.name().to_owned(),
     status:         SystemStatus::Failed,
     completeness:   Completeness::Partial {
       reason: err.to_string(),
@@ -435,6 +436,7 @@ async fn sweep_one(
     SystemOutcome {
       system: sys.id.clone(),
       system_kind: ruleset.system_kind,
+      connector: connector.name().to_owned(),
       status,
       completeness: snapshot.completeness,
       observed_count,

@@ -1,0 +1,16 @@
+-- Which connector read a system, recorded per sweep beside what it
+-- reported.
+--
+-- A check can be scoped to a connector (`connector:unifi-access`), and
+-- that has to be answerable without the configuration file: evaluation
+-- runs inside the sweep's transaction and replays from the streams, so a
+-- scope that depended on whatever `overlord.toml` said at replay time
+-- would not be replayable. `sweep_system` is the right home because it
+-- already records what a connector actually did during a run, and it is
+-- deliberately not cleared by a rebuild.
+--
+-- Nullable because rows written before this migration cannot be
+-- backfilled: nothing in the streams says which connector produced them.
+-- A connector selector simply matches nothing for a system until its
+-- next sweep, which is one sweep of latency and no wrong answers.
+ALTER TABLE sweep_system ADD COLUMN connector TEXT;

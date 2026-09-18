@@ -402,10 +402,11 @@ fn editor(
             label class="field" {
               span { "Systems" }
               input type="text" name="systems" value=(form.systems)
-                    placeholder="idp, okta-prod";
+                    placeholder="idp, okta-prod, connector:unifi-access";
               div class="hint" {
-                "System kinds or instance ids, comma separated. Empty means \
-                 every system."
+                "Comma separated. A system kind (idp, workspace, sso, mdm), \
+                 an instance id, or connector:<name> for every system read \
+                 through one connector. Empty means every system."
               }
             }
             label class="field" {

@@ -63,7 +63,12 @@ impl Subject for Person {
     self
       .entities
       .iter()
-      .filter(|e| sel.matches(&e.normalized.system, e.normalized.system_kind))
+      // No connector here: which connector read a system is a fact the
+      // engine's `World` carries, not something an entity knows. A
+      // `connector:` selector is exercised where that map exists.
+      .filter(|e| {
+        sel.matches(&e.normalized.system, e.normalized.system_kind, None)
+      })
       .collect()
   }
 

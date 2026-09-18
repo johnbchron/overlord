@@ -9,29 +9,77 @@ use crate::{
   violation::Evidence,
 };
 
-/// A scope restriction naming either a system instance or a system kind
-/// (SPEC.md section 7's `systems`, and the argument to `has_entity`).
+/// The prefix that makes a selector name a connector rather than a
+/// system. Explicit because the alternative is a third namespace
+/// silently overlapping the other two.
+pub const CONNECTOR_PREFIX: &str = "connector:";
+
+/// A scope restriction naming a system instance, a system kind, or the
+/// connector a system is read through (SPEC.md section 7's `systems`,
+/// and the argument to `has_entity`).
 ///
-/// The two namespaces overlap, so resolution is ordered and documented:
-/// a selector that spells a known system kind means the kind. An operator
-/// who names a system instance `idp` cannot select it alone — a trade the
-/// spec already accepts by letting one field mean both.
-#[derive(
-  Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
-#[serde(untagged)]
+/// The kind and id namespaces overlap, so resolution is ordered and
+/// documented: a selector that spells a known system kind means the
+/// kind. An operator who names a system instance `idp` cannot select it
+/// alone — a trade the spec already accepts by letting one field mean
+/// both.
+///
+/// A connector is the third answer to "which systems", and the one the
+/// other two cannot give: `sso` is every access and SSO system, and a
+/// system id is one console, but "every console read through
+/// `unifi-access`" is neither. It is spelled with a prefix rather than
+/// folded into the same bare-word resolution, because a third
+/// overlapping namespace would make `unifi-access` mean different things
+/// depending on what a deployment happened to name its systems.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SystemSelector {
   Kind(SystemKind),
   Id(SystemId),
+  /// `connector:<name>`, as the connector names itself.
+  Connector(String),
+}
+
+// Serialized as its own spelling, not by `untagged`.
+//
+// Every variant is a bare string, so `untagged` cannot tell them apart:
+// it tries them in declaration order and `Id` accepts anything, so a
+// stored `connector:unifi-access` came back as a system id named
+// `connector:unifi-access` and silently matched nothing. Going through
+// `Display`/`FromStr` makes the round trip the same resolution an
+// operator's typed selector gets — and produces byte-identical JSON for
+// kinds and ids, so revisions written before this still read.
+impl Serialize for SystemSelector {
+  fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+    s.collect_str(self)
+  }
+}
+
+impl<'de> Deserialize<'de> for SystemSelector {
+  fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+    let s = String::deserialize(d)?;
+    s.parse().map_err(serde::de::Error::custom)
+  }
 }
 
 impl SystemSelector {
   /// Whether this selector matches a concrete system.
+  ///
+  /// `connector` is the name of the connector that read the system, as
+  /// the last sweep recorded it. It is `None` for a system that has
+  /// never been swept under a build that recorded one, and a connector
+  /// selector never matches that: an unknown connector is not evidence
+  /// of a particular one.
   #[must_use]
-  pub fn matches(&self, id: &SystemId, kind: SystemKind) -> bool {
+  pub fn matches(
+    &self,
+    id: &SystemId,
+    kind: SystemKind,
+    connector: Option<&str>,
+  ) -> bool {
     match self {
       Self::Kind(k) => *k == kind,
       Self::Id(i) => i == id,
+      Self::Connector(c) => connector == Some(c.as_str()),
     }
   }
 }
@@ -41,6 +89,7 @@ impl fmt::Display for SystemSelector {
     match self {
       Self::Kind(k) => write!(f, "{k}"),
       Self::Id(i) => write!(f, "{i}"),
+      Self::Connector(c) => write!(f, "{CONNECTOR_PREFIX}{c}"),
     }
   }
 }
@@ -51,6 +100,12 @@ impl FromStr for SystemSelector {
   fn from_str(s: &str) -> Result<Self, Self::Err> {
     if s.is_empty() {
       return Err(ParseRefError::Empty);
+    }
+    if let Some(name) = s.strip_prefix(CONNECTOR_PREFIX) {
+      if name.is_empty() {
+        return Err(ParseRefError::Empty);
+      }
+      return Ok(Self::Connector(name.to_owned()));
     }
     Ok(
       s.parse::<SystemKind>()
@@ -135,16 +190,73 @@ mod tests {
   fn a_selector_spelling_a_kind_means_the_kind() {
     let s: SystemSelector = "idp".parse().unwrap();
     assert_eq!(s, SystemSelector::Kind(SystemKind::Idp));
-    assert!(s.matches(&SystemId::new("okta-prod"), SystemKind::Idp));
-    assert!(!s.matches(&SystemId::new("okta-prod"), SystemKind::Mdm));
+    assert!(s.matches(&SystemId::new("okta-prod"), SystemKind::Idp, None));
+    assert!(!s.matches(&SystemId::new("okta-prod"), SystemKind::Mdm, None));
   }
 
   #[test]
   fn an_unknown_selector_means_a_system_id() {
     let s: SystemSelector = "okta-prod".parse().unwrap();
     assert_eq!(s, SystemSelector::Id(SystemId::new("okta-prod")));
-    assert!(s.matches(&SystemId::new("okta-prod"), SystemKind::Idp));
-    assert!(!s.matches(&SystemId::new("okta-dev"), SystemKind::Idp));
+    assert!(s.matches(&SystemId::new("okta-prod"), SystemKind::Idp, None));
+    assert!(!s.matches(&SystemId::new("okta-dev"), SystemKind::Idp, None));
+  }
+
+  #[test]
+  fn a_prefixed_selector_means_the_connector_that_read_the_system() {
+    let s: SystemSelector = "connector:unifi-access".parse().unwrap();
+    assert_eq!(s, SystemSelector::Connector("unifi-access".to_owned()));
+    assert_eq!(s.to_string(), "connector:unifi-access");
+
+    let hq = SystemId::new("access-hq");
+    assert!(s.matches(&hq, SystemKind::Sso, Some("unifi-access")));
+    // A second console on the same connector, which is the point.
+    assert!(s.matches(
+      &SystemId::new("access-warehouse"),
+      SystemKind::Sso,
+      Some("unifi-access")
+    ));
+    // Another SSO system, which the `sso` kind would have caught.
+    assert!(!s.matches(
+      &SystemId::new("okta-prod"),
+      SystemKind::Sso,
+      Some("okta")
+    ));
+    // A system whose connector was never recorded.
+    assert!(!s.matches(&hq, SystemKind::Sso, None));
+  }
+
+  #[test]
+  fn a_connector_name_is_only_a_connector_when_it_says_so() {
+    // Bare, it is a system id — a deployment may well have named a
+    // system after its connector, and that spelling must not change
+    // meaning underneath it.
+    let bare: SystemSelector = "unifi-access".parse().unwrap();
+    assert_eq!(bare, SystemSelector::Id(SystemId::new("unifi-access")));
+    assert!(!bare.matches(
+      &SystemId::new("access-hq"),
+      SystemKind::Sso,
+      Some("unifi-access")
+    ));
+
+    assert!("connector:".parse::<SystemSelector>().is_err());
+  }
+
+  #[test]
+  fn every_selector_round_trips_through_its_spelling() {
+    for s in ["idp", "workspace", "okta-prod", "connector:unifi-access"] {
+      let sel: SystemSelector = s.parse().unwrap();
+      assert_eq!(sel.to_string(), s);
+      assert_eq!(sel.to_string().parse::<SystemSelector>().unwrap(), sel);
+
+      // And through serde, which is how a check revision is stored. A
+      // derived `untagged` could not do this: every variant is a bare
+      // string, so `Id` swallowed `connector:` selectors on the way
+      // back in and they matched nothing.
+      let json = serde_json::to_string(&sel).unwrap();
+      assert_eq!(json, format!("\"{s}\""));
+      assert_eq!(serde_json::from_str::<SystemSelector>(&json).unwrap(), sel);
+    }
   }
 
   #[test]

@@ -76,6 +76,10 @@ pub struct FactRow {
 pub struct SystemOutcome {
   pub system:         SystemId,
   pub system_kind:    SystemKind,
+  /// The connector that read it, as the connector names itself. Kept
+  /// beside the rest because a check may be scoped to it and evaluation
+  /// cannot reach the configuration file.
+  pub connector:      String,
   pub status:         SystemStatus,
   pub completeness:   Completeness,
   pub observed_count: usize,
@@ -309,12 +313,14 @@ impl Writer<'_> {
   ) -> Result<()> {
     self.conn().execute(
       "INSERT INTO sweep_system (
-         sweep_id, system, system_kind, status, complete, observed_count,
-         tombstoned, previous_count, guard_tripped, duration_ms, error)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         sweep_id, system, system_kind, connector, status, complete,
+         observed_count, tombstoned, previous_count, guard_tripped,
+         duration_ms, error)
+       VALUES (?1, ?2, ?3, ?12, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
        ON CONFLICT (sweep_id, system) DO UPDATE SET
          status = excluded.status,
          complete = excluded.complete,
+         connector = excluded.connector,
          observed_count = excluded.observed_count,
          tombstoned = excluded.tombstoned,
          previous_count = excluded.previous_count,
@@ -335,6 +341,7 @@ impl Writer<'_> {
         i32::from(outcome.guard_tripped),
         i64::try_from(outcome.duration_ms).unwrap_or(i64::MAX),
         outcome.error.as_deref(),
+        outcome.connector.as_str(),
       ],
     )?;
     Ok(())

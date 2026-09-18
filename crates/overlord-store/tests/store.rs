@@ -2,12 +2,13 @@
 //! only the store can enforce.
 
 use overlord_core::{
-  Actor, CheckDraft, CheckId, CommandKind, EntityKey, EntityRef, EntityStatus,
-  EntityType, NewCommand, NormalizedRecord, PersonUid, Revision, Severity,
-  SubjectKind, SweepId, SystemId, SystemKind, Timestamp, Value,
+  Actor, CheckDraft, CheckId, CommandKind, Completeness, EntityKey, EntityRef,
+  EntityStatus, EntityType, NewCommand, NormalizedRecord, PersonUid, Revision,
+  Severity, SubjectKind, SweepId, SystemId, SystemKind, Timestamp, Value,
 };
 use overlord_store::{
-  Db, NewFact, SubjectFilter, SweepStart, SweepStatus, error::StoreError,
+  Db, NewFact, SubjectFilter, SweepStart, SweepStatus, SystemOutcome,
+  SystemStatus, error::StoreError,
 };
 
 const T0: &str = "2026-01-15T00:00:00Z";
@@ -710,4 +711,58 @@ fn a_filtered_roster_is_cut_by_the_limit_after_the_filter_not_before() {
       .len(),
     5
   );
+}
+
+// --- which connector read a system -------------------------------------
+
+fn outcome(system: &str, connector: &str) -> SystemOutcome {
+  SystemOutcome {
+    system:         SystemId::new(system),
+    system_kind:    SystemKind::Sso,
+    connector:      connector.to_owned(),
+    status:         SystemStatus::Ok,
+    completeness:   Completeness::Complete,
+    observed_count: 1,
+    tombstoned:     0,
+    previous_count: None,
+    guard_tripped:  false,
+    duration_ms:    1,
+    error:          None,
+  }
+}
+
+#[test]
+fn the_connector_a_system_was_last_read_through_is_recorded() {
+  // A check can be scoped to `connector:<name>`, and evaluation cannot
+  // see the configuration file — it runs inside the sweep and replays
+  // from the streams — so the connector has to be recorded beside what
+  // it reported.
+  let db = db();
+  let s = sweep(&db, T0);
+  db.write(|w| w.record_system(s, &outcome("access-hq", "unifi-access")))
+    .unwrap();
+  db.write(|w| w.record_system(s, &outcome("okta-prod", "okta")))
+    .unwrap();
+
+  let map = db.read(|r| r.system_connectors()).unwrap();
+  assert_eq!(map[&SystemId::new("access-hq")], "unifi-access");
+  assert_eq!(map[&SystemId::new("okta-prod")], "okta");
+  assert!(!map.contains_key(&SystemId::new("never-swept")));
+}
+
+#[test]
+fn a_system_moved_to_another_connector_is_scoped_by_the_current_one() {
+  // The latest sweep wins. Otherwise a system read through a connector
+  // once, years ago, would stay in that connector's scope forever.
+  let db = db();
+  let first = sweep(&db, T0);
+  db.write(|w| w.record_system(first, &outcome("access-hq", "unifi-access")))
+    .unwrap();
+  let second = sweep(&db, T1);
+  db.write(|w| w.record_system(second, &outcome("access-hq", "unifi-v2")))
+    .unwrap();
+
+  let map = db.read(|r| r.system_connectors()).unwrap();
+  assert_eq!(map[&SystemId::new("access-hq")], "unifi-v2");
+  assert_eq!(map.len(), 1, "one row per system, not one per sweep");
 }
