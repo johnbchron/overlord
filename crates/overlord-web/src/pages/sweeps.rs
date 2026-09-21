@@ -171,8 +171,15 @@ fn progress_body(run_state: &RunState, latest: Option<&SweepRow>) -> Markup {
         }
         div class="soft" { (progress_line(run)) }
         @if !run.notes.is_empty() {
+          // Newest first. The feed is a bounded scrolling box, so in
+          // arrival order the line that just arrived is the one below
+          // the fold — the operator watches a sweep to see what it is
+          // doing *now*, and would have had to scroll for it on every
+          // poll. `notes` stays oldest-first in the runner, where
+          // appending the newest and dropping the oldest is what the
+          // backlog bound means; the reversal is presentation.
           div class="feed" {
-            @for line in &run.notes {
+            @for line in run.notes.iter().rev() {
               div { (line) }
             }
           }
@@ -348,6 +355,14 @@ fn coverage_table(coverage: &[CoverageRow]) -> Markup {
                 @if let Some(e) = &c.error {
                   div class="soft" { (e) }
                 }
+                // Why it is partial, which the "partial" tag beside it
+                // cannot say. A system that collected something and
+                // knows it is not the whole truth should say what it
+                // missed, rather than leaving the operator to re-run
+                // the sweep and watch the warnings go past.
+                @if let Some(why) = &c.partial_reason {
+                  div class="soft" { (why) }
+                }
               }
             }
           }
@@ -382,5 +397,55 @@ fn status_tag(s: &SweepRow) -> Markup {
     } @else {
       span class="tag tag-warn" { (s.status.as_str()) }
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::sweeprun::RunProgress;
+
+  fn running(notes: &[&str]) -> RunState {
+    RunState::Running(RunProgress {
+      sweep:      Some(1),
+      total:      2,
+      finished:   1,
+      current:    Some("ucm-extensions".to_owned()),
+      evaluating: false,
+      notes:      notes.iter().map(|n| (*n).to_owned()).collect(),
+    })
+  }
+
+  #[test]
+  fn the_feed_shows_the_newest_line_first() {
+    // The feed is a bounded scrolling box (9rem in the stylesheet), so
+    // in arrival order the line that just arrived is the one below the
+    // fold — and an operator watching a sweep is watching for exactly
+    // that line. Reversed, the newest is always in view without
+    // scrolling on every poll.
+    let html = progress_body(
+      &running(&["reading extensions, page 1", "reading users, page 1"]),
+      None,
+    )
+    .into_string();
+
+    let newest = html
+      .find("reading users, page 1")
+      .expect("the newest note is rendered");
+    let oldest = html
+      .find("reading extensions, page 1")
+      .expect("the oldest note is rendered");
+    assert!(
+      newest < oldest,
+      "the newest note must come first in the feed: {html}"
+    );
+  }
+
+  #[test]
+  fn a_run_with_no_notes_renders_no_feed_at_all() {
+    // An empty bordered box under the bar reads as "something is
+    // missing" rather than "nothing has been reported yet".
+    let html = progress_body(&running(&[]), None).into_string();
+    assert!(!html.contains("class=\"feed\""), "{html}");
   }
 }

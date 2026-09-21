@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use overlord_connect::{Connector, ConnectorError, ObserveCtx, Progress};
 use overlord_connector_grandstream_ucm::{
   GrandstreamUcmConnector, device_envelope, normalize_mac, redact,
+  yes_no_to_bool,
 };
 use overlord_core::{Completeness, SystemId, Timestamp, Value as CoreValue};
 use serde_json::{Value, json};
@@ -149,28 +150,31 @@ fn normalized(
 
 #[tokio::test]
 async fn extensions_are_read_and_normalized() {
-  let (server, seen) = ucm(vec![(
-    "listAccount",
-    list(vec![
-      account(
-        "1001",
-        "Ada Lovelace",
-        json!({ "email_to_user": "ada@x.com" }),
-      ),
-      account("1002", "Grace Hopper", json!({ "status": "Unavailable" })),
-    ]),
-  )])
+  let (server, seen) = ucm(vec![
+    (
+      "listAccount",
+      list(vec![
+        account("1001", "Ada Lovelace", json!({})),
+        account("1002", "Grace Hopper", json!({ "status": "Unavailable" })),
+      ]),
+    ),
+    (
+      "listUser",
+      user_list(vec![user("1001", json!("ada@x.com"), json!({}))]),
+    ),
+  ])
   .await;
 
   let snapshot = observe(&server, json!({})).await.unwrap();
   assert_eq!(snapshot.observations.len(), 2);
   assert!(snapshot.completeness.is_complete());
 
-  // The handshake happened, in order, before the read.
+  // The handshake happened, in order, before either read.
   assert_eq!(seen.lock().unwrap().as_slice(), [
     "challenge",
     "login",
-    "listAccount"
+    "listAccount",
+    "listUser"
   ]);
 
   let c = connector();
@@ -272,7 +276,9 @@ async fn one_extensions_detail_failing_makes_the_snapshot_partial() {
   )])
   .await;
 
-  let snapshot = observe(&server, json!({ "detail": true })).await.unwrap();
+  let snapshot = observe(&server, json!({ "detail": true, "users": false }))
+    .await
+    .unwrap();
   assert_eq!(snapshot.observations.len(), 1);
   assert!(matches!(
     snapshot.completeness,
@@ -481,6 +487,432 @@ async fn a_ucm_with_no_provisioned_handsets_is_a_real_answer() {
 
   assert!(snapshot.observations.is_empty());
   assert!(snapshot.completeness.is_complete());
+}
+
+/// A `listUser` page, as the guide's worked example shapes it: the
+/// array lives under `user_id`, and `user_name` is the extension.
+fn user_list(users: Vec<Value>) -> Value {
+  json!({ "user_id": users, "page": 1, "total_item": 1, "total_page": 1 })
+}
+
+fn user(extension: &str, email: Value, extra: Value) -> Value {
+  let mut u = json!({
+    "user_id": 2,
+    "user_name": extension,
+    "privilege": 3,
+    "first_name": "Ada",
+    "last_name": "Lovelace",
+    "department": "engineering",
+    "email": email,
+    "email_to_user": "yes",
+    "enable_multiple_extension": "no",
+    "multiple_extension": null,
+    "cookie": "sid523099813-1555662509",
+    "login_time": "2019-04-19 16:49:05",
+  });
+  let o = u.as_object_mut().unwrap();
+  for (k, v) in extra.as_object().into_iter().flatten() {
+    o.insert(k.clone(), v.clone());
+  }
+  u
+}
+
+// --- voicemail forwarding addresses -----------------------------------
+
+#[tokio::test]
+async fn an_extensions_email_address_comes_from_its_user_record() {
+  // `listAccount` carries `email_to_user`, a yes/no flag, and no
+  // address at all. The address voicemail is emailed to is on the user
+  // record, which is why the connector reads both.
+  let (server, seen) = ucm(vec![
+    (
+      "listAccount",
+      list(vec![account("1001", "Ada Lovelace", json!({}))]),
+    ),
+    (
+      "listUser",
+      user_list(vec![user("1001", json!("ada@example.com"), json!({}))]),
+    ),
+  ])
+  .await;
+
+  let snapshot = observe(&server, json!({})).await.unwrap();
+  assert!(seen.lock().unwrap().iter().any(|a| a == "listUser"));
+  assert!(snapshot.completeness.is_complete());
+
+  let c = connector();
+  let records = normalized(&snapshot, &ctx(&server, json!({})), &c);
+  assert_eq!(
+    records[0].get("email"),
+    CoreValue::String("ada@example.com".to_owned())
+  );
+  assert_eq!(records[0].get("email_to_user"), CoreValue::Bool(true));
+  assert_eq!(
+    records[0].get("department"),
+    CoreValue::String("engineering".to_owned())
+  );
+}
+
+#[tokio::test]
+async fn an_extension_with_no_user_record_has_no_address_rather_than_a_wrong_one()
+ {
+  // Null is not an empty address. An extension the appliance keeps no
+  // user for — a paging slot, a conference room — simply has none.
+  let (server, _) = ucm(vec![
+    (
+      "listAccount",
+      list(vec![
+        account("1001", "Ada", json!({})),
+        account("7000", "Paging", json!({})),
+      ]),
+    ),
+    (
+      "listUser",
+      user_list(vec![user("1001", json!("ada@example.com"), json!({}))]),
+    ),
+  ])
+  .await;
+
+  let snapshot = observe(&server, json!({})).await.unwrap();
+  let c = connector();
+  let records = normalized(&snapshot, &ctx(&server, json!({})), &c);
+  let paging = records
+    .iter()
+    .find(|r| r.entity_key.as_str() == "7000")
+    .unwrap();
+  assert_eq!(paging.get("email"), CoreValue::Null);
+  assert_eq!(paging.get("email_to_user"), CoreValue::Null);
+}
+
+#[tokio::test]
+async fn a_user_whose_address_is_unset_is_null_not_the_flag() {
+  // The bug this replaced mapped `email` to `email_to_user`, putting
+  // the string "no" in the overlay's email field — which is what the
+  // identity resolver reads to propose links between systems.
+  let (server, _) = ucm(vec![
+    ("listAccount", list(vec![account("1001", "Ada", json!({}))])),
+    (
+      "listUser",
+      user_list(vec![user(
+        "1001",
+        Value::Null,
+        json!({ "email_to_user": "no" }),
+      )]),
+    ),
+  ])
+  .await;
+
+  let snapshot = observe(&server, json!({})).await.unwrap();
+  let c = connector();
+  let records = normalized(&snapshot, &ctx(&server, json!({})), &c);
+  assert_eq!(records[0].get("email"), CoreValue::Null);
+  assert_eq!(records[0].get("email_to_user"), CoreValue::Bool(false));
+}
+
+#[tokio::test]
+async fn a_web_session_cookie_never_reaches_the_fact_stream() {
+  // A user record carries the live session id of whoever is logged into
+  // the web UI as that user. Unlike a password, even its length is
+  // worth nothing.
+  let (server, _) = ucm(vec![
+    ("listAccount", list(vec![account("1001", "Ada", json!({}))])),
+    (
+      "listUser",
+      user_list(vec![user("1001", json!("ada@example.com"), json!({}))]),
+    ),
+  ])
+  .await;
+
+  let snapshot = observe(&server, json!({})).await.unwrap();
+  let raw = serde_json::to_string(&snapshot.observations[0].raw).unwrap();
+  assert!(!raw.contains("sid523099813"), "{raw}");
+  assert!(!raw.contains("cookie"), "{raw}");
+  // The rest of the record is still there.
+  assert!(raw.contains("ada@example.com"));
+}
+
+#[tokio::test]
+async fn a_failed_user_read_is_a_gap_not_a_failure() {
+  // Extensions still collect; they just have no addresses this sweep.
+  // Partial is what stops the gap tombstoning anything.
+  let (server, _) = ucm(vec![(
+    "listAccount",
+    list(vec![account("1001", "Ada", json!({}))]),
+  )])
+  .await;
+
+  let snapshot = observe(&server, json!({})).await.unwrap();
+  assert_eq!(snapshot.observations.len(), 1);
+  assert!(matches!(
+    snapshot.completeness,
+    Completeness::Partial { .. }
+  ));
+  assert!(
+    snapshot.warnings[0].contains("listUser"),
+    "{:?}",
+    snapshot.warnings
+  );
+}
+
+#[tokio::test]
+async fn users_can_be_turned_off() {
+  let (server, seen) = ucm(vec![(
+    "listAccount",
+    list(vec![account("1001", "Ada", json!({}))]),
+  )])
+  .await;
+
+  let snapshot = observe(&server, json!({ "users": false })).await.unwrap();
+  assert!(!seen.lock().unwrap().iter().any(|a| a == "listUser"));
+  // And with the read not attempted, there is no gap to report.
+  assert!(snapshot.completeness.is_complete());
+}
+
+#[tokio::test]
+async fn a_user_holding_several_extensions_attaches_to_each() {
+  let (server, _) = ucm(vec![
+    (
+      "listAccount",
+      list(vec![
+        account("1001", "Ada", json!({})),
+        account("1002", "Ada desk", json!({})),
+      ]),
+    ),
+    (
+      "listUser",
+      user_list(vec![user(
+        "1001",
+        json!("ada@example.com"),
+        json!({
+          "enable_multiple_extension": "yes",
+          "multiple_extension": "1002",
+        }),
+      )]),
+    ),
+  ])
+  .await;
+
+  let snapshot = observe(&server, json!({})).await.unwrap();
+  let c = connector();
+  let records = normalized(&snapshot, &ctx(&server, json!({})), &c);
+  for r in &records {
+    assert_eq!(
+      r.get("email"),
+      CoreValue::String("ada@example.com".to_owned()),
+      "{} missed the address",
+      r.entity_key
+    );
+  }
+}
+
+#[tokio::test]
+async fn list_user_asks_for_nothing_it_does_not_need() {
+  // A UCM6308A answers -26 to the sort parameters the UCM62xx guide's
+  // example sends — it sorts by `extension`, which the user record does
+  // not have. Nothing here needs an order, so nothing here asks for one.
+  let server = MockServer::start().await;
+  let seen: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+  let log = Arc::clone(&seen);
+
+  Mock::given(method("POST"))
+    .and(path("/api"))
+    .respond_with(move |req: &Request| {
+      let body: Value =
+        serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+      let request = body.get("request").cloned().unwrap_or(Value::Null);
+      let action = request
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+      log.lock().unwrap().push(request);
+      match action.as_str() {
+        "challenge" => ok(json!({ "challenge": "c" })),
+        "login" => ok(json!({ "cookie": "sid1-2" })),
+        "listUser" => {
+          ok(user_list(vec![user("1001", json!("ada@x.com"), json!({}))]))
+        }
+        _ => ok(list(vec![account("1001", "Ada", json!({}))])),
+      }
+    })
+    .mount(&server)
+    .await;
+
+  observe(&server, json!({})).await.unwrap();
+
+  let call = seen
+    .lock()
+    .unwrap()
+    .iter()
+    .find(|r| r["action"] == json!("listUser"))
+    .cloned()
+    .expect("listUser was called");
+  assert!(call.get("sidx").is_none(), "{call}");
+  assert!(call.get("sord").is_none(), "{call}");
+  // The paging it does need still travels as strings.
+  assert_eq!(call["page"], json!("1"));
+  assert_eq!(call["item_num"], json!("100"));
+}
+
+#[tokio::test]
+async fn list_user_retries_once_with_no_parameters_at_all() {
+  // Firmwares disagree about this call's parameters and nothing
+  // published says what any of them accepts. Asking for the whole
+  // collection in one request is the fallback that depends on least.
+  let server = MockServer::start().await;
+  let log: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+  let seen = Arc::clone(&log);
+
+  Mock::given(method("POST"))
+    .and(path("/api"))
+    .respond_with(move |req: &Request| {
+      let body: Value =
+        serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+      let request = body.get("request").cloned().unwrap_or(Value::Null);
+      let action = request
+        .get("action")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_owned();
+      seen.lock().unwrap().push(request.clone());
+      match action.as_str() {
+        "challenge" => ok(json!({ "challenge": "c" })),
+        "login" => ok(json!({ "cookie": "sid1-2" })),
+        "listUser" => {
+          // Rejects any paging, the way -26 did.
+          if request.get("item_num").is_some() {
+            ResponseTemplate::new(200).set_body_json(json!({ "status": -26 }))
+          } else {
+            ok(user_list(vec![user("1001", json!("ada@x.com"), json!({}))]))
+          }
+        }
+        _ => ok(list(vec![account("1001", "Ada", json!({}))])),
+      }
+    })
+    .mount(&server)
+    .await;
+
+  let snapshot = observe(&server, json!({})).await.unwrap();
+  // The retry succeeded, so the sweep is whole and the address landed.
+  assert!(snapshot.completeness.is_complete());
+  let c = connector();
+  let records = normalized(&snapshot, &ctx(&server, json!({})), &c);
+  assert_eq!(
+    records[0].get("email"),
+    CoreValue::String("ada@x.com".to_owned())
+  );
+
+  let calls = log.lock().unwrap();
+  let user_calls: Vec<&Value> = calls
+    .iter()
+    .filter(|r| r["action"] == json!("listUser"))
+    .collect();
+  assert_eq!(user_calls.len(), 2, "one paged attempt, then one bare");
+  assert!(user_calls[1].get("item_num").is_none());
+}
+
+#[tokio::test]
+async fn both_list_user_attempts_failing_reports_both() {
+  // The pair is the diagnosis: "it refused paging and it refused
+  // nothing at all" says something different from either alone.
+  let (server, _) = ucm(vec![(
+    "listAccount",
+    list(vec![account("1001", "Ada", json!({}))]),
+  )])
+  .await;
+
+  let snapshot = observe(&server, json!({})).await.unwrap();
+  assert_eq!(snapshot.observations.len(), 1, "extensions still collect");
+  assert!(matches!(
+    snapshot.completeness,
+    Completeness::Partial { .. }
+  ));
+  let warning = &snapshot.warnings[0];
+  assert!(warning.contains("item_num and page"), "{warning}");
+  assert!(warning.contains("no parameters at all"), "{warning}");
+}
+
+// --- the appliance's dialect ------------------------------------------
+
+#[tokio::test]
+async fn the_appliances_yes_and_no_become_real_booleans() {
+  // The shared normalizer accepts only "true"/"false", deliberately. The
+  // UCM says "yes"/"no" for every boolean it has, so without the
+  // rewrite a ruleset asking for a boolean gets null and a warning on
+  // every sweep — `has_voicemail` was three-valued forever and no check
+  // reading it could ever fire.
+  let (server, _) = ucm(vec![
+    ("listAccount", list(vec![account("1001", "Ada", json!({}))])),
+    (
+      "getSIPAccount",
+      json!({ "extension": {
+        "extension": "1001",
+        "hasvoicemail": "yes",
+        "dnd": "no",
+        "nat": "yes",
+        "permission": "internal",
+        "auto_record": "off",
+      }}),
+    ),
+  ])
+  .await;
+
+  let cfg = json!({ "detail": true, "users": false });
+  let snapshot = observe(&server, cfg.clone()).await.unwrap();
+  let c = connector();
+  let records = normalized(&snapshot, &ctx(&server, cfg), &c);
+  assert_eq!(records[0].get("has_voicemail"), CoreValue::Bool(true));
+  assert_eq!(records[0].get("dnd"), CoreValue::Bool(false));
+  assert_eq!(records[0].get("nat"), CoreValue::Bool(true));
+  // Values that merely look enum-ish are left alone.
+  assert_eq!(
+    records[0].get("permission"),
+    CoreValue::String("internal".to_owned())
+  );
+}
+
+#[tokio::test]
+async fn an_out_of_service_extension_is_suspended_when_the_ucm_says_no() {
+  // The appliance spells this `"no"`/`"yes"`, not `"1"`. The status rule
+  // keyed only on "1"/"true", so a disabled extension read as active.
+  let (server, _) = ucm(vec![(
+    "listAccount",
+    list(vec![account(
+      "1003",
+      "Reception",
+      json!({ "out_of_service": "yes", "status": "Idle" }),
+    )]),
+  )])
+  .await;
+
+  let cfg = json!({ "users": false });
+  let snapshot = observe(&server, cfg.clone()).await.unwrap();
+  let c = connector();
+  let records = normalized(&snapshot, &ctx(&server, cfg), &c);
+  assert_eq!(records[0].status, overlord_core::EntityStatus::Suspended);
+}
+
+#[test]
+fn yes_and_no_convert_but_nothing_else_does() {
+  let v = yes_no_to_bool(&json!({
+    "a": "yes",
+    "b": "no",
+    "c": "Yes",
+    "d": "off",
+    "e": "internal",
+    "nested": { "f": "no" },
+    "list": [{ "g": "yes" }],
+    "n": 1,
+  }));
+  assert_eq!(v["a"], json!(true));
+  assert_eq!(v["b"], json!(false));
+  // Only the exact lowercase spellings the appliance uses.
+  assert_eq!(v["c"], json!("Yes"));
+  assert_eq!(v["d"], json!("off"));
+  assert_eq!(v["e"], json!("internal"));
+  assert_eq!(v["nested"]["f"], json!(false));
+  assert_eq!(v["list"][0]["g"], json!(true));
+  assert_eq!(v["n"], json!(1));
 }
 
 // --- zero config devices ----------------------------------------------

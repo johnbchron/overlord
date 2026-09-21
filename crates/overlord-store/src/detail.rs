@@ -37,6 +37,12 @@ pub struct CoverageRow {
   pub guard_tripped:  bool,
   pub duration_ms:    i64,
   pub error:          Option<String>,
+  /// Why the snapshot was partial, when it was.
+  ///
+  /// Distinct from `error`, which is set when a system *failed*. A
+  /// partial system collected something and knows it is not the whole
+  /// truth; this is what it knows.
+  pub partial_reason: Option<String>,
 }
 
 impl CoverageRow {
@@ -136,7 +142,8 @@ impl Reader<'_> {
   pub fn coverage(&self, sweep: SweepId) -> Result<Vec<CoverageRow>> {
     let mut stmt = self.conn().prepare(
       "SELECT system, system_kind, status, complete, observed_count,
-              tombstoned, previous_count, guard_tripped, duration_ms, error
+              tombstoned, previous_count, guard_tripped, duration_ms, error,
+              partial_reason
          FROM sweep_system WHERE sweep_id = ?1 ORDER BY system",
     )?;
     let rows = stmt.query_map([sweep.0], |r| {
@@ -151,6 +158,7 @@ impl Reader<'_> {
         r.get::<_, i64>(7)? != 0,
         r.get::<_, i64>(8)?,
         r.get::<_, Option<String>>(9)?,
+        r.get::<_, Option<String>>(10)?,
       ))
     })?;
     let mut out = Vec::new();
@@ -166,6 +174,7 @@ impl Reader<'_> {
         guard_tripped,
         duration_ms,
         error,
+        partial_reason,
       ) = row?;
       out.push(CoverageRow {
         system: SystemId::new(system),
@@ -178,6 +187,7 @@ impl Reader<'_> {
         guard_tripped,
         duration_ms,
         error,
+        partial_reason,
       });
     }
     Ok(out)

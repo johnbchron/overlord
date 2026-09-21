@@ -7,7 +7,7 @@
   "display_name": { "path": "account.fullname" },
   "status": {
     "when": [
-      { "path": "account.out_of_service", "map": { "1": "suspended", "true": "suspended" } },
+      { "path": "account.out_of_service", "map": { "true": "suspended", "1": "suspended", "yes": "suspended" } },
       { "path": "account.status", "map": {
         "Idle": "active",
         "Busy": "active",
@@ -25,8 +25,13 @@
     "registration": { "path": "account.addr", "as": "string" },
     "presence_status": { "path": "account.presence_status", "as": "string" },
     "presence_script": { "path": "account.presence_def_script", "as": "string" },
-    "email": { "path": "account.email_to_user", "as": "string" },
-    "username": { "path": "account.user_name", "as": "string" },
+    "email": { "path": "user.email", "as": "string" },
+    "username": { "path": "user.user_name", "as": "string" },
+    "email_to_user": { "path": "user.email_to_user", "as": "boolean" },
+    "department": { "path": "user.department", "as": "string" },
+    "first_name": { "path": "user.first_name", "as": "string" },
+    "last_name": { "path": "user.last_name", "as": "string" },
+    "user_privilege": { "path": "user.privilege", "as": "number" },
     "new_voicemail": { "path": "account.newmsg", "as": "number" },
     "old_voicemail": { "path": "account.oldmsg", "as": "number" },
     "has_secret": { "path": "has_secret", "as": "boolean" },

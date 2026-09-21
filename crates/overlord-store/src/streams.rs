@@ -315,8 +315,8 @@ impl Writer<'_> {
       "INSERT INTO sweep_system (
          sweep_id, system, system_kind, connector, status, complete,
          observed_count, tombstoned, previous_count, guard_tripped,
-         duration_ms, error)
-       VALUES (?1, ?2, ?3, ?12, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+         duration_ms, error, partial_reason)
+       VALUES (?1, ?2, ?3, ?12, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?13)
        ON CONFLICT (sweep_id, system) DO UPDATE SET
          status = excluded.status,
          complete = excluded.complete,
@@ -326,7 +326,8 @@ impl Writer<'_> {
          previous_count = excluded.previous_count,
          guard_tripped = excluded.guard_tripped,
          duration_ms = excluded.duration_ms,
-         error = excluded.error",
+         error = excluded.error,
+         partial_reason = excluded.partial_reason",
       params![
         sweep.0,
         outcome.system.as_str(),
@@ -342,6 +343,7 @@ impl Writer<'_> {
         i64::try_from(outcome.duration_ms).unwrap_or(i64::MAX),
         outcome.error.as_deref(),
         outcome.connector.as_str(),
+        outcome.completeness.reason(),
       ],
     )?;
     Ok(())

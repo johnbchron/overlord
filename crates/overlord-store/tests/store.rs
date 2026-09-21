@@ -1255,3 +1255,42 @@ fn a_rebuild_leaves_the_search_index_intact() {
     4
   );
 }
+
+#[test]
+fn a_partial_system_records_why_it_was_partial() {
+  // `complete` is a boolean and `error` is only written when a system
+  // failed, so a partial sweep used to record that it was partial and
+  // throw away the reason — which is the one thing an operator wants
+  // from it. Answering "partial why?" meant re-running the sweep to
+  // watch the warnings scroll past.
+  let db = db();
+  let s = sweep(&db, T0);
+  let mut partial = outcome("ucm-extensions", "grandstream-ucm");
+  partial.status = SystemStatus::Partial;
+  partial.completeness = Completeness::Partial {
+    reason: "listUser failed with item_num and page".to_owned(),
+  };
+  db.write(|w| w.record_system(s, &partial)).unwrap();
+  db.write(|w| w.commit_sweep(s, SweepStatus::Partial, ts(T0)))
+    .unwrap();
+
+  let coverage = db.read(|r| r.coverage(s)).unwrap();
+  assert!(!coverage[0].complete);
+  assert_eq!(
+    coverage[0].partial_reason.as_deref(),
+    Some("listUser failed with item_num and page")
+  );
+  // Distinct from `error`, which belongs to a system that failed.
+  assert_eq!(coverage[0].error, None);
+}
+
+#[test]
+fn a_complete_system_records_no_reason() {
+  let db = db();
+  let s = sweep(&db, T0);
+  db.write(|w| w.record_system(s, &outcome("gws-prod", "google-workspace")))
+    .unwrap();
+  let coverage = db.read(|r| r.coverage(s)).unwrap();
+  assert!(coverage[0].complete);
+  assert_eq!(coverage[0].partial_reason, None);
+}

@@ -1453,3 +1453,99 @@ nothing.
 
 `cargo test --workspace`: 383 passing. `clippy -D warnings` and
 `fmt --check`: clean.
+
+### 2026-09-21 — UCM: email addresses, and three bugs found getting them
+
+**The address is not on the extension.** `listAccount`'s documented
+options carry `email_to_user`, a `"yes"`/`"no"` flag, and no address;
+`getSIPAccount`'s documented response has no address either. The address
+is on the appliance's *user* record — a separate object joined to the
+extension by `user_name` — which `listUser` returns. That is the address
+an extension's voicemail is emailed to. `users = true` (default) reads it
+as one paged call and folds each record onto its extension; a user read
+that fails is a gap, not a failure, so extensions still collect.
+
+The guide documents the address and the flag but does not say the flag is
+voicemail-specific rather than governing user email generally, so both
+reach the overlay under the appliance's own names rather than under one
+that would assert the connection.
+
+Three defects found on the way, all in what shipped this morning.
+
+**`email` was mapped to `email_to_user`.** The overlay's email field held
+the string `"no"`. That field is what identity resolution reads to
+propose cross-system links, so the connector was feeding a yes/no flag
+into the signal that decides whether a PBX extension and a Workspace
+account are the same person. The per-system uniqueness rule would have
+suppressed most of the damage, which is the only reason this was not
+visible.
+
+**Every boolean was null.** The UCM spells booleans `"yes"`/`"no"`; the
+shared normalizer accepts `"true"`/`"false"` only, deliberately, as the
+two unambiguous spellings. So `has_voicemail`, `dnd` and `nat` were null
+plus a warning on every extension on every sweep — not a degraded check
+but one that could never fire. `yes_no_to_bool` rewrites them inside the
+connector, which keeps the vendor's dialect where the vendor is, rather
+than widening a shared coercion for one appliance.
+
+**`out_of_service` never suspended anything.** Same root cause: the
+status rule keyed on `"1"`/`"true"` and the appliance says `"yes"`, so a
+disabled extension read as active. The map now carries all three
+spellings, belt and braces, since the rewrite already handles it.
+
+Also: a user record carries the live session id of whoever is logged into
+the web UI as that user. `redact` now drops any `cookie` field outright —
+unlike a password, even its length is worth nothing — and `clean` is the
+one function every stored record passes through, so a path that redacted
+without rewriting booleans, or the reverse, is not expressible.
+
+Tested: the address arriving from the user record; an extension with no
+user record having no address rather than a wrong one; an unset address
+staying null rather than becoming the flag; the session cookie never
+reaching the stream; a failed user read staying partial; `users = false`;
+a user holding several extensions attaching to each; `"yes"`/`"no"`
+converting while `"off"`, `"internal"` and `"Yes"` do not; and an
+out-of-service extension finally reading as suspended.
+
+`cargo test --workspace`: 393 passing. `clippy -D warnings` and
+`fmt --check`: clean.
+
+### 2026-09-21 — listUser's parameters, and recording why a sweep was partial
+
+Sweep 16 came up partial with all 80 extensions collected and none
+carrying `raw.user`: `listUser` had failed wholesale, with status -26.
+Permissions were ruled out on the appliance — `listUser` is in the cdrapi
+set — which leaves a parameter.
+
+**The suspect was `sidx`.** The UCM62xx guide's `listUser` example sorts
+by `extension`, which is not a column the user record has; it has
+`user_name`. Nothing in this connector needs an order — the records go
+into a map keyed by extension — so `sidx` and `sord` are simply not sent
+any more. An optional parameter that buys nothing is only a way for the
+call to fail.
+
+This is a reasoned hypothesis, not a confirmed diagnosis: -26 is
+documented nowhere, and the appliance says nothing but the number. So
+the call also **retries once with no parameters at all** when the first
+attempt fails — asking for the whole collection in one request is the
+shape that depends on the least. If both fail, both are reported,
+because "it refused paging and it refused nothing at all" says something
+neither attempt says alone.
+
+**A partial system now records why.** This was the real reason the above
+took a round trip: `complete` is a boolean and `error` is only written
+when a system *failed*, so `Completeness::Partial { reason }` was
+discarded at the point of writing. A partial sweep recorded that it was
+partial and threw away the one thing an operator wants from it, and
+answering "partial why?" meant re-running the sweep to watch the
+warnings scroll past. A reason only observable while it happens is not a
+record. `sweep_system.partial_reason` holds it, `CoverageRow` carries it,
+and the sweep detail screen prints it under the row — beside `error`
+rather than instead of it, because a system that collected something and
+knows it is incomplete is not the same as one that failed.
+
+Migrations verified against a copy of the live 11MB store: the column
+adds cleanly and 0004's backfill indexed all 1337 entities.
+
+`cargo test --workspace`: 400 passing. `clippy -D warnings` and
+`fmt --check`: clean.

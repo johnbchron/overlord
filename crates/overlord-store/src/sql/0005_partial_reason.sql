@@ -1,0 +1,14 @@
+-- Why a system's snapshot was partial.
+--
+-- `complete` is a boolean and `error` is only written when a system
+-- *failed*, so a partial sweep recorded that it was partial and threw
+-- away the reason — which is the one thing an operator wants from it.
+-- Answering "partial why?" meant re-running the sweep to watch the
+-- warnings scroll past, and a reason that is only observable while it
+-- is happening is not a record.
+--
+-- Nullable because a complete system has no reason, and because rows
+-- written before this migration cannot be backfilled: the text was
+-- never stored. Those keep reading as a partial with no reason given,
+-- which is what they are.
+ALTER TABLE sweep_system ADD COLUMN partial_reason TEXT;

@@ -332,6 +332,87 @@ pub async fn accounts(
   }
 }
 
+/// Every UCM user, one page at a time.
+///
+/// A *user* is not an extension. The appliance keeps a user-management
+/// record beside each SIP account — a login, a name, a department, and
+/// an email address — and `listAccount` does not carry the address at
+/// all: the documented option list has `email_to_user`, a `"yes"`/`"no"`
+/// flag, and no address to go with it. The address is here.
+///
+/// The array is under `user_id`, which reads like a typo for `user` but
+/// is what the guide's worked example shows. An inference is kept behind
+/// it for a firmware that spells it the way one would expect.
+pub async fn users(
+  http: &RestrictedHttp,
+  session: &Session,
+  progress: &Progress,
+) -> Paged {
+  let mut out = Paged::default();
+  let mut page = 1u64;
+
+  loop {
+    if page > MAX_PAGES {
+      out.incomplete = Some(format!("stopped after {MAX_PAGES} pages"));
+      return out;
+    }
+    progress.say(format!("reading users, page {page}"));
+
+    // No `sidx`/`sord`. The UCM62xx guide's example sorts this call by
+    // `extension`, which is not a column the user record has — it has
+    // `user_name` — and a UCM6308A refuses the whole call with status
+    // -26 when it is sent. Nothing here needs an order: the records go
+    // into a map keyed by extension. An optional parameter that buys
+    // nothing is only a way for the call to fail.
+    let paged: Vec<(&str, Value)> = vec![
+      ("item_num", json!(PAGE_SIZE.to_string())),
+      ("page", json!(page.to_string())),
+    ];
+    let body = match call_as(http, session, "listUser", &paged).await {
+      Ok(b) => b,
+      Err(paged_err) if page == 1 => {
+        // One retry, with nothing optional left to reject. Firmwares
+        // disagree about this call's parameters and there is no
+        // published list of what any of them accepts, so asking for
+        // the whole collection in one request is the fallback that
+        // depends on the least. If it also fails, both attempts are
+        // reported — the pair is the diagnosis.
+        match call_as(http, session, "listUser", &[]).await {
+          Ok(b) => {
+            warn!("listUser rejected its paging parameters; read unpaged");
+            b
+          }
+          Err(bare_err) => {
+            out.incomplete = Some(format!(
+              "listUser failed with item_num and page ({paged_err}), and \
+               again with no parameters at all ({bare_err})"
+            ));
+            return out;
+          }
+        }
+      }
+      Err(e) => {
+        out.incomplete = Some(format!("listUser page {page}: {e}"));
+        return out;
+      }
+    };
+
+    let items = list_of(&body, Some("user_id"))
+      .or_else(|| list_of(&body, None))
+      .map(|(_, items)| items)
+      .unwrap_or_default();
+    let empty = items.is_empty();
+    out.items.extend(items);
+
+    match body.get("total_page").and_then(Value::as_u64) {
+      _ if empty => return out,
+      Some(total) if page >= total => return out,
+      Some(_) => page += 1,
+      None => return out,
+    }
+  }
+}
+
 /// The detail record for one extension.
 ///
 /// `listAccount` returns the columns it is asked for; this returns the

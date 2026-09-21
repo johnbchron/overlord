@@ -46,5 +46,6 @@ credentials_env = "OVERLORD_UCM_PASSWORD"
 username = "cdrapi"
 
 detail = true
+users = true
 
 tls_insecure = true

@@ -38,6 +38,11 @@ pub struct RunProgress {
   pub evaluating: bool,
   /// The most recent notes from inside the system being read, oldest
   /// first. Bounded: a screen wants the tail, not the transcript.
+  ///
+  /// Oldest first is the storage order, because that is what makes the
+  /// bound mean "keep the newest `NOTE_BACKLOG`" — the newest is
+  /// appended and the oldest dropped. The Sweeps screen renders it
+  /// reversed, so the line that just arrived is the one in view.
   pub notes:      Vec<String>,
 }
 

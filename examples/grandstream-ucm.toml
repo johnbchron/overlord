@@ -46,6 +46,15 @@ mode = "extensions"
 # secret. Off by default; turn it on if a check needs them.
 detail = false
 
+# Read the appliance's user records and fold each onto its extension.
+# One paged read, not one call per extension.
+#
+# This is the only way to get an email address: listAccount carries
+# `email_to_user`, a yes/no flag, and no address — the address an
+# extension's voicemail is emailed to lives on the user record. It also
+# supplies department and the operator's name. On by default.
+users = true
+
 # A UCM signs its own certificate for :8089. ca_cert is the right answer
 # when there is a certificate to trust; tls_insecure gives up knowing
 # which host answered, and is the last resort.

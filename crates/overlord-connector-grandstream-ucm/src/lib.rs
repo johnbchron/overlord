@@ -64,16 +64,42 @@
 //!
 //! # The shape of an observation
 //!
-//! Extensions are the vendor's `listAccount` row, with `detail` folded
-//! in when `detail = true`:
+//! Extensions are the vendor's `listAccount` row, with the user record
+//! folded in, and `detail` too when `detail = true`:
 //!
 //! ```json
 //! {
 //!   "account": { "extension": "1001", "fullname": "Ada Lovelace",
 //!                "status": "Idle", "addr": "10.0.0.31:5062" },
+//!   "user":    { "user_name": "1001", "email": "ada@example.com",
+//!                "email_to_user": true, "department": "engineering" },
 //!   "detail":  { "...": "the getSIPAccount record, secrets removed" }
 //! }
 //! ```
+//!
+//! # Where an email address comes from
+//!
+//! Not from the extension. `listAccount`'s documented options carry
+//! `email_to_user` — a yes/no flag — and no address at all, and the
+//! `getSIPAccount` record has no address either. The address is on the
+//! appliance's *user* record, which is a separate object joined to the
+//! extension by `user_name`, and `listUser` is the read that gets it.
+//! That address is the one an extension's voicemail is emailed to.
+//!
+//! What the vendor documents is the address and the flag; it does not
+//! say the flag is voicemail-specific rather than governing user email
+//! generally. So both reach the overlay under the names the appliance
+//! gives them — `email` and `email_to_user` — rather than under a name
+//! that would assert the connection.
+//!
+//! # The appliance's dialect
+//!
+//! The UCM spells every boolean `"yes"` or `"no"`. The shared normalizer
+//! accepts only `"true"`/`"false"`, deliberately, so those are rewritten
+//! on the way in by [`yes_no_to_bool`]. Without it a ruleset asking for
+//! `"as": "boolean"` gets null and a warning on every such field, every
+//! sweep — which is not a degraded check but a check that can never
+//! fire.
 //!
 //! Devices are the envelope plus the payload:
 //!
@@ -111,6 +137,8 @@
 //! the UniFi Access connector.
 
 pub mod api;
+
+use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use overlord_connect::{
@@ -184,6 +212,15 @@ pub struct Config {
   /// already carries status, registration and name, and the detail is
   /// for checks that reach past those. Ignored in `devices` mode.
   pub detail:               bool,
+  /// Read the appliance's user records and fold each one onto its
+  /// extension.
+  ///
+  /// On by default, and it is one paged read rather than one call per
+  /// extension. It is also the only way to get an email address: the
+  /// documented `listAccount` options carry `email_to_user`, a yes/no
+  /// flag, and no address — the address an extension's voicemail is
+  /// emailed to lives on the user record. Ignored in `devices` mode.
+  pub users:                bool,
   /// What to call for the Zero Config device list.
   ///
   /// Configuration rather than a constant because Grandstream documents
@@ -209,6 +246,7 @@ impl Default for Config {
       credentials_env:      "OVERLORD_UCM_PASSWORD".to_owned(),
       mode:                 Mode::default(),
       detail:               false,
+      users:                true,
       zero_config_action:   DEFAULT_ZERO_CONFIG_ACTION.to_owned(),
       zero_config_list_key: None,
       ca_cert:              None,
@@ -312,6 +350,24 @@ impl GrandstreamUcmConnector {
       ));
     }
 
+    // Users, indexed by the extension each one answers for. One paged
+    // read, not one call per extension.
+    let mut by_extension: BTreeMap<String, Value> = BTreeMap::new();
+    if cfg.users {
+      let users = api::users(http, session, &ctx.progress).await;
+      if let Some(reason) = users.incomplete {
+        // A user read that failed leaves every extension without an
+        // email address. That is a gap, not a deletion.
+        incomplete.push(reason);
+      }
+      for user in users.items {
+        let redacted = clean(&user);
+        for extension in extensions_of(&user) {
+          by_extension.insert(extension, redacted.clone());
+        }
+      }
+    }
+
     let mut observations = Vec::with_capacity(read.items.len());
     for account in read.items {
       let extension = account
@@ -321,7 +377,7 @@ impl GrandstreamUcmConnector {
 
       let detail = if cfg.detail && !extension.is_empty() {
         match api::sip_account(http, session, &extension).await {
-          Ok(d) => Some(redact(&d)),
+          Ok(d) => Some(clean(&d)),
           Err(e) => {
             // One extension's detail failing is not the enumeration
             // failing, but it is a gap, and a gap makes the snapshot
@@ -335,10 +391,13 @@ impl GrandstreamUcmConnector {
       };
 
       let mut raw = Map::new();
-      raw.insert("account".to_owned(), redact(&account));
+      raw.insert("account".to_owned(), clean(&account));
       if let Some(d) = detail {
         raw.insert("has_secret".to_owned(), json!(has_secret(&d)));
         raw.insert("detail".to_owned(), d);
+      }
+      if let Some(user) = by_extension.get(&extension) {
+        raw.insert("user".to_owned(), user.clone());
       }
       observations.push(Observation::new(Value::Object(raw)));
     }
@@ -414,6 +473,42 @@ fn finish(observations: Vec<Observation>, incomplete: Vec<String>) -> Snapshot {
   }
 }
 
+/// The extensions a user record answers for.
+///
+/// `user_name` is the extension number for an extension's user — the
+/// appliance's own examples show `"user_name":"1083"` — and something
+/// else entirely for a login like `admin`, which then matches no
+/// extension and attaches to nothing.
+///
+/// `multiple_extension` is best-effort: the field exists beside
+/// `enable_multiple_extension`, but every documented example has it
+/// null, so both shapes a vendor might reasonably use are accepted and
+/// neither is assumed. It can only add attachments, never redirect one.
+fn extensions_of(user: &Value) -> Vec<String> {
+  let mut out: Vec<String> = user
+    .get("user_name")
+    .and_then(value_as_str)
+    .into_iter()
+    .collect();
+
+  match user.get("multiple_extension") {
+    Some(Value::Array(items)) => {
+      out.extend(items.iter().filter_map(value_as_str));
+    }
+    Some(Value::String(s)) => {
+      out.extend(
+        s.split(',')
+          .map(str::trim)
+          .filter(|e| !e.is_empty())
+          .map(ToOwned::to_owned),
+      );
+    }
+    _ => {}
+  }
+  out.retain(|e| !e.is_empty());
+  out
+}
+
 /// A JSON scalar as a string. The UCM spells an extension number as a
 /// string in one action and a number in another, and both are the same
 /// extension.
@@ -431,6 +526,44 @@ fn has_secret(redacted: &Value) -> bool {
     .get("secret_len")
     .and_then(Value::as_u64)
     .is_some_and(|n| n > 0)
+}
+
+/// A vendor record as an observation carries it: secrets removed, the
+/// appliance's `"yes"`/`"no"` rewritten as booleans.
+///
+/// One function because the two always travel together — every record
+/// this connector stores goes through both — and a path that applied
+/// only one of them is exactly the bug neither is written to allow.
+#[must_use]
+pub fn clean(v: &Value) -> Value { yes_no_to_bool(&redact(v)) }
+
+/// Rewrite the appliance's `"yes"`/`"no"` as real booleans.
+///
+/// The UCM spells every boolean that way — `hasvoicemail`, `dnd`, `nat`,
+/// `out_of_service`, `email_to_user` — and the shared normalizer accepts
+/// only `"true"`/`"false"`, deliberately, as the two unambiguous
+/// spellings. Without this, a ruleset asking for `"as": "boolean"` gets
+/// null and a warning on every field of every extension on every sweep:
+/// a check reading `has_voicemail` would be three-valued forever and
+/// never fire.
+///
+/// Converting here rather than widening the shared coercion keeps the
+/// vendor's dialect inside the connector that speaks it, which is what
+/// the normalization overlay is for. Only the exact strings are touched,
+/// so `"off"`, `"auto_dtls"` and `"internal"` pass through untouched.
+#[must_use]
+pub fn yes_no_to_bool(v: &Value) -> Value {
+  match v {
+    Value::String(s) if s == "yes" => Value::Bool(true),
+    Value::String(s) if s == "no" => Value::Bool(false),
+    Value::Object(o) => Value::Object(
+      o.iter()
+        .map(|(k, val)| (k.clone(), yes_no_to_bool(val)))
+        .collect(),
+    ),
+    Value::Array(a) => Value::Array(a.iter().map(yes_no_to_bool).collect()),
+    other => other.clone(),
+  }
 }
 
 /// Drop every secret from a vendor record, keeping only its length.
@@ -452,6 +585,14 @@ pub fn redact(v: &Value) -> Value {
         if lower.ends_with("secret") || lower.ends_with("password") {
           let len = val.as_str().map_or(0, str::len);
           out.insert(format!("{k}_len"), json!(len));
+          continue;
+        }
+        // A user record carries the live session id of whoever is
+        // logged into the web UI as that user. It is a credential, it
+        // answers no question a check could ask, and unlike a password
+        // even its length is worth nothing — so it is dropped outright
+        // rather than measured.
+        if lower == "cookie" {
           continue;
         }
         out.insert(k.clone(), redact(val));
