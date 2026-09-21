@@ -933,3 +933,161 @@ fn dump(db: &Db) -> Vec<String> {
   }
   out
 }
+
+// --- what belongs to a person, and what is one -------------------------
+
+/// The identity pair plus a system of desk phones. `phone-extension` is
+/// the case the policy and the matcher have to disagree about: not a
+/// person, and still the property of one.
+fn with_phones() -> Vec<SystemConfig> {
+  let mut systems = both();
+  systems.push(system("phones", "identity-phones.json"));
+  systems
+}
+
+async fn sweep_phones(db: &Db, at: &str) -> SweepOutcome {
+  let plan = SweepPlan::new(with_phones()).at(ts(at));
+  run_sweep(db, &Registry::new().with(FixtureConnector::boxed()), &plan)
+    .await
+    .unwrap()
+}
+
+fn set_policy(db: &Db, types: &[&str]) {
+  overlord_engine::sync_identity_policy(
+    db,
+    &types
+      .iter()
+      .map(|t| overlord_core::EntityType::new(*t))
+      .collect::<Vec<_>>(),
+    &actor(),
+    ts(NOW),
+  )
+  .unwrap();
+}
+
+#[tokio::test]
+async fn an_address_matches_across_entity_types() {
+  // The index used to be keyed by entity type, so an extension could
+  // only ever match another extension — an address on a desk phone
+  // could never find the person who answers it, whatever the policy
+  // said.
+  let db = Db::open_memory().unwrap();
+  sweep_phones(&db, NOW).await;
+
+  let phone: Vec<_> = suggestions(&db)
+    .into_iter()
+    .filter(|(entity, ..)| entity.starts_with("phones/"))
+    .collect();
+
+  assert!(
+    phone.iter().any(|(entity, person, signal)| {
+      entity == "phones/phone-extension/1001"
+        && person == "implicit:ws/user/ada@example.com"
+        && signal == "exact-email"
+    }),
+    "the desk phone should be proposed as Ada's: {phone:?}"
+  );
+  // The paging extension offers no address and is nobody's.
+  assert!(
+    !phone.iter().any(|(e, ..)| e.ends_with("/7000")),
+    "{phone:?}"
+  );
+}
+
+#[tokio::test]
+async fn a_non_person_type_is_still_proposed_as_belonging_to_somebody() {
+  // The distinction this is all about: `phone-extension` is not a
+  // person, and the extension on Ada's desk is still Ada's.
+  let db = Db::open_memory().unwrap();
+  set_policy(&db, &["phone-extension"]);
+  sweep_phones(&db, NOW).await;
+
+  let all = suggestions(&db);
+  assert!(
+    all.iter().any(|(entity, person, _)| {
+      entity == "phones/phone-extension/1001"
+        && person == "implicit:ws/user/ada@example.com"
+    }),
+    "an excluded type must still be proposed as belonging to a person: {all:?}"
+  );
+}
+
+#[tokio::test]
+async fn a_non_person_type_is_never_proposed_as_being_somebody() {
+  // The other half. An unlinked extension stands for its own implicit
+  // singleton, which the policy says does not exist — so proposing an
+  // account link *to* it would invent exactly the person the policy
+  // refuses.
+  let db = Db::open_memory().unwrap();
+  set_policy(&db, &["phone-extension"]);
+  sweep_phones(&db, NOW).await;
+
+  let all = suggestions(&db);
+  assert!(
+    !all
+      .iter()
+      .any(|(_, person, _)| person.contains("phone-extension")),
+    "nothing may be proposed as being an extension: {all:?}"
+  );
+
+  // Without the policy the same sweep does propose it, which is what
+  // makes the assertion above about the policy and not about the data.
+  let open = Db::open_memory().unwrap();
+  sweep_phones(&open, NOW).await;
+  assert!(
+    suggestions(&open)
+      .iter()
+      .any(|(_, person, _)| person.contains("phone-extension")),
+    "without the policy an extension is an ordinary implicit person"
+  );
+}
+
+#[tokio::test]
+async fn confirming_the_phone_link_promotes_the_person_not_the_phone() {
+  // End to end: the suggestion an operator actually acts on. The
+  // extension joins Ada's person; it does not become a person.
+  let db = Db::open_memory().unwrap();
+  set_policy(&db, &["phone-extension"]);
+  sweep_phones(&db, NOW).await;
+
+  let phone = EntityRef::new("phones", "phone-extension", "1001");
+  let uid = PersonUid::new("P-ada");
+  db.write(|w| {
+    w.append_command(&NewCommand::new(
+      actor(),
+      CommandKind::PersonCreate {
+        person_uid:   uid.clone(),
+        display_name: Some("Ada Lovelace".to_owned()),
+      },
+      ts(LATER),
+    ))?;
+    w.append_command(&NewCommand::new(
+      actor(),
+      CommandKind::PersonLink {
+        person_uid:      uid.clone(),
+        entity:          phone.clone(),
+        from_suggestion: None,
+      },
+      ts(LATER),
+    ))
+  })
+  .unwrap();
+
+  let linked_to: Vec<_> = db
+    .read(|r| r.links())
+    .unwrap()
+    .into_iter()
+    .filter(|(_, held_by)| held_by == &uid)
+    .map(|(entity, _)| entity)
+    .collect();
+  assert!(linked_to.contains(&phone), "{linked_to:?}");
+
+  // And a linked one is targetable again: it resolves to a person the
+  // operator confirmed, so the policy has nothing left to protect.
+  sweep_phones(&db, LATER).await;
+  let all = suggestions(&db);
+  assert!(
+    !all.iter().any(|(e, ..)| e == "phones/phone-extension/1001"),
+    "a linked entity is not re-proposed: {all:?}"
+  );
+}

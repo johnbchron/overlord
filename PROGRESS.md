@@ -1549,3 +1549,50 @@ adds cleanly and 0004's backfill indexed all 1337 entities.
 
 `cargo test --workspace`: 400 passing. `clippy -D warnings` and
 `fmt --check`: clean.
+
+### 2026-09-21 — belonging to a person is not being one
+
+The identity policy conflated two things, and the write-up when it landed
+said so out loud without noticing: "they are simply never *implicit*
+people, and are not proposed as link candidates." The second clause does
+not follow from the first. A desk phone is not a person; the extension on
+it still carries the address of the person who answers it.
+
+Two changes, one of which is the one that actually mattered.
+
+**The suggestion index is no longer keyed by entity type.** It was, to
+stop a user and a group that share a string being read as the same
+person — and that rule also meant an extension could only ever match
+another extension, so an address on a desk phone could never find its
+owner no matter what the policy said. This was the real blocker, and it
+applied whether or not a type was excluded. The same address is the same
+address, whatever kind of object carries it.
+
+**What replaces it is narrower and says what it means.** A type the
+policy excludes may not be the person a suggestion *points at*:
+`targetable` refuses a proposal whose target is an unlinked entity of an
+excluded type, because that target is its implicit singleton, which is
+exactly the person the policy says does not exist. A group can be
+proposed as belonging to somebody; it can never be proposed as being
+somebody. A *linked* entity is targetable again — it resolves to a
+person the operator already confirmed, so there is nothing left to
+protect.
+
+The suggestion is one-directional as a result, and rightly: the phone is
+proposed as Ada's, Ada is not proposed as the phone's.
+
+Worth watching: the `username` signal reads `user_name`, and a UCM
+extension's is its extension number. Across types that is a weaker
+coincidence than it was within one, and the per-system uniqueness rule
+plus operator confirmation are what stand behind it. If it turns out
+noisy, restricting cross-type matching to the two strong signals is the
+next move.
+
+Tested: an address matching across entity types; an excluded type still
+proposed as belonging to somebody; never proposed as being somebody, with
+the same sweep *without* the policy asserted to propose it — so the test
+is about the policy and not about the fixture; and confirming the link
+putting the extension into Ada's person without making it one.
+
+`cargo test --workspace`: 404 passing. `clippy -D warnings` and
+`fmt --check`: clean.

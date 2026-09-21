@@ -1,0 +1,22 @@
+{
+  "system_kind": "sso",
+  "entity_type": "phone-extension",
+  "stages": [
+    {
+      "note": "desk phones, carrying the address of whoever answers them",
+      "records": [
+        {
+          "key": "1001",
+          "name": "Ada's desk",
+          "state": "active",
+          "email": "ada@example.com"
+        },
+        {
+          "key": "7000",
+          "name": "Paging",
+          "state": "active"
+        }
+      ]
+    }
+  ]
+}

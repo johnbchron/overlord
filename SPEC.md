@@ -261,6 +261,15 @@ still evaluated by entity-scoped checks, still shown on their own entity pages,
 and still become members of a real person once one is confirmed for them — they
 are simply never *implicit* people, and are not proposed as link candidates.
 
+**The policy says what is not a person, not what cannot belong to one.** The two
+are different and the distinction is load-bearing: a desk phone is nobody, and
+the extension on it still carries the address of the person who answers it. An
+entity of an excluded type is therefore still matched by identity resolution and
+still proposed as *belonging to* a person — it simply may never be the person a
+suggestion points at, because its implicit singleton is exactly the person the
+policy says does not exist. A linked one is targetable again, since it then
+resolves to a person the operator confirmed.
+
 The policy is authored in the configuration file, which is the operator's
 natural place for it, but the file is not what evaluation reads: a change there
 appends an `identity.policy` command, and evaluation reads the projection.
@@ -553,7 +562,10 @@ Cross-system unification is a core insight generator, and is **operator-driven**
 
 - Each sweep computes **candidate links** using conservative, explainable
   signals (exact email, directory id attributes, username conventions). Each
-  candidate shows its evidence.
+  candidate shows its evidence. Signals are matched **across entity types**: the
+  same address is the same address whether it sits on a workspace account or a
+  desk phone, and what stops a non-person object being mistaken for a person is
+  the identity policy (section 6.4), not a refusal to compare it.
 - Suggestions are **read-only**. They are never applied automatically, and no
   command is emitted on their behalf. A check may set
   `suppress_if_pending_links` to stay quiet about a subject whose suggestions are

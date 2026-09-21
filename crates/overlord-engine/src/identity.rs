@@ -80,15 +80,15 @@ pub fn recompute_suggestions(w: &Writer<'_>, sweep: SweepId) -> Result<usize> {
   let mut offers: BTreeMap<EntityRef, BTreeMap<Signal, Offer>> =
     BTreeMap::new();
   let mut kinds: BTreeMap<EntityRef, SystemKind> = BTreeMap::new();
-  // A type that is not a person is left out of the index entirely, so
-  // it neither proposes a link nor is proposed as one. Suggesting that
-  // two handsets be unified into a person would be offering the
-  // operator a confirmation that contradicts the policy.
+  // The identity policy says which types are not *people*. It does not
+  // say which types cannot *belong* to one, and conflating the two was
+  // wrong: a desk phone is not a person, and the extension on it still
+  // carries the address of the person who answers it. So every entity
+  // offers its signals here, whatever its type; what the policy governs
+  // is whether an entity can be the *person* a suggestion points at
+  // (see `targetable` below).
   let non_person = r.non_person_entity_types()?;
   for state in r.entity_states(None)? {
-    if non_person.contains(&state.entity.entity_type) {
-      continue;
-    }
     kinds.insert(state.entity.clone(), state.normalized.system_kind);
     let mut mine = BTreeMap::new();
     for signal in Signal::ALL {
@@ -106,23 +106,48 @@ pub fn recompute_suggestions(w: &Writer<'_>, sweep: SweepId) -> Result<usize> {
     holder.insert(entity, r.resolve_person(&uid)?);
   }
 
-  // (signal, entity type, value) -> system -> the entities offering it.
-  // Keyed by entity type because a user and a group that happen to share
-  // a string are not the same person, and grouped by system because the
-  // uniqueness rule below is per-system.
+  // (signal, value) -> system -> the entities offering it. Grouped by
+  // system because the uniqueness rule below is per-system.
+  //
+  // Not keyed by entity type. It used to be, to stop a user and a group
+  // that share a string being read as the same person — but that rule
+  // also stopped a phone extension being read as *belonging to* the
+  // person whose address it carries, which is the more common case and
+  // the one an operator actually wants. The same address is the same
+  // address, whatever kind of object carries it.
+  //
+  // What replaces the old rule is narrower and says what it means: a
+  // type the policy calls not-a-person cannot be the person a
+  // suggestion points at. A group can still be proposed as belonging to
+  // somebody; it can never be proposed as being somebody.
   let mut index: BTreeMap<
-    (Signal, EntityType, String),
+    (Signal, String),
     BTreeMap<SystemId, Vec<EntityRef>>,
   > = BTreeMap::new();
   for (entity, mine) in &offers {
     for (signal, offer) in mine {
       index
-        .entry((*signal, entity.entity_type.clone(), offer.value.clone()))
+        .entry((*signal, offer.value.clone()))
         .or_default()
         .entry(entity.system.clone())
         .or_default()
         .push(entity.clone());
     }
+  }
+
+  /// Whether an entity can be the person a suggestion points at.
+  ///
+  /// A linked entity always can: it resolves to a person the operator
+  /// already confirmed. An unlinked one stands for its own implicit
+  /// singleton, which a type the policy excludes does not have — so
+  /// proposing it would invent exactly the person the policy says does
+  /// not exist.
+  fn targetable(
+    other: &EntityRef,
+    holder: &BTreeMap<EntityRef, PersonUid>,
+    non_person: &BTreeSet<EntityType>,
+  ) -> bool {
+    holder.contains_key(other) || !non_person.contains(&other.entity_type)
   }
 
   let mut out: Vec<Suggestion> = Vec::new();
@@ -138,7 +163,7 @@ pub fn recompute_suggestions(w: &Writer<'_>, sweep: SweepId) -> Result<usize> {
       let Some(offer) = mine.get(&signal) else {
         continue;
       };
-      let key = (signal, entity.entity_type.clone(), offer.value.clone());
+      let key = (signal, offer.value.clone());
       let Some(by_system) = index.get(&key) else {
         continue;
       };
@@ -162,6 +187,9 @@ pub fn recompute_suggestions(w: &Writer<'_>, sweep: SweepId) -> Result<usize> {
         let [other] = &candidates[..] else {
           continue;
         };
+        if !targetable(other, &holder, &non_person) {
+          continue;
+        }
         let person = holder
           .get(other)
           .cloned()
