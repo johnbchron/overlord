@@ -1,0 +1,23 @@
+[package]
+name = "overlord-connector-grandstream-ucm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Read-only Grandstream UCM connector for overlord"
+
+[dependencies]
+overlord-core.workspace = true
+overlord-connect.workspace = true
+async-trait.workspace = true
+md-5.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+wiremock.workspace = true
+
+[lints]
+workspace = true

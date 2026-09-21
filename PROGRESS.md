@@ -5,7 +5,8 @@ lands, not in advance. Spec references like (§7) point at
 [SPEC.md](SPEC.md); plan references at PLAN.md.
 
 **Current milestone:** M4 — Breadth. Google Workspace (task 24) complete;
-the access/SSO half of task 26 (a UniFi Access connector) landed.
+task 26's access/SSO half (UniFi Access) and its MDM half (Grandstream
+UCM, `mode = "devices"`) have both landed.
 
 ---
 
@@ -47,10 +48,10 @@ the access/SSO half of task 26 (a UniFi Access connector) landed.
 | --- | --- | --- |
 | 24 | `overlord-connector-gworkspace` | done |
 | 25 | IdP connector (Okta, then Entra ID) | not started |
-| 26 | Access/SSO assignments, then MDM | part done — UniFi Access landed |
+| 26 | Access/SSO assignments, then MDM | part done — UniFi Access and Grandstream UCM landed |
 | 27 | Per-connector normalization rulesets, authored as commands | not started |
 
-`cargo test --workspace`: **301 passing, 0 failing.**
+`cargo test --workspace`: **358 passing, 0 failing.**
 `cargo clippy --workspace --all-targets -- -D warnings`: **clean.**
 `cargo fmt --all -- --check`: **clean.**
 
@@ -1190,4 +1191,159 @@ trusted rather than only the first; and the transport error's cause
 chain.
 
 `cargo test --workspace`: 289 passing. `clippy -D warnings` and
+`fmt --check`: clean.
+
+### 2026-09-21 — identity policy: entity types that are not people (§6.4)
+
+Groundwork for the UCM connector, and worth having on its own. §6.4
+evaluates every unlinked entity as an implicit singleton person, which is
+what makes orphan-account checks possible. That reasoning is about
+accounts. A device has no counterpart to be missing, and an implicit
+singleton over one holds exactly the entity an entity-scoped check
+already sees — so all it adds is a row on the Users roster per device and
+a subject handed to every person check that declared no scope. An
+unscoped `not has_entity("idp")` over a 200-handset fleet is 200 criticals.
+
+Authored in `overlord.toml` as `[identity] non_person_entity_types`, but
+the file is **not** what evaluation reads. §13 admits no input to
+evaluation outside the two streams, and this decides which subjects
+exist, so a change to the file appends an `identity.policy` command and
+evaluation reads the projection — the same shape as a check or a ruleset.
+`crates/overlord-engine/src/policy.rs` reconciles the two on every
+invocation and appends only on a real difference; set equality is what
+keeps a steady state silent. Denylist rather than allowlist so that empty
+is exactly the behaviour every existing store already had.
+
+It bites in three places, all reading the same projection: `world.rs`
+(no implicit singleton), `read.rs` `all_subjects` (the same predicate in
+SQL, so the roster cannot disagree with evaluation), and `identity.rs`
+(those types leave the suggestion index — proposing that two handsets be
+unified into a person would contradict the policy). Turning it on
+resolves the violations it orphans as `subject_absent`, through the
+existing `reconcile` pass; no new lifecycle.
+
+Tested: the before/after difference end to end, the orphaned violations
+resolving, an unchanged policy appending nothing across repeated runs,
+the roster filter, and `identity_policy` added to the replay dump so
+`replay(streams) == live` actually covers it.
+
+### 2026-09-21 — M4: the Grandstream UCM connector (task 26, MDM half)
+
+A UCM6308A, read twice. `crates/overlord-connector-grandstream-ucm/` is
+`api.rs` (the challenge/login handshake and the four actions) and
+`lib.rs` (config, the two modes, redaction, the device envelope), with a
+shipped ruleset per mode.
+
+**One appliance is two systems, deliberately.** A UCM holds extensions,
+which belong to people, and Zero Config handsets, which do not. A ruleset
+declares one `entity_type`, so `mode` picks between
+`ruleset-extension.json` (`phone-extension`, kind `sso`) and
+`ruleset-device.json` (`phone-device`, kind `mdm`) — the same seam the
+fixture connector uses to front two system kinds at once. It is not a
+workaround: the two populations sweep at different rates, are scoped by
+different checks, and fail independently, which is the property that
+matters because Zero Config is the half that may not answer.
+
+Extensions report `sso`, not `workspace`. An extension is an assignment
+to a person within one application. Reporting `workspace` would make
+`has_entity("workspace")` true for somebody who has only a desk phone and
+quietly break the shipped `workspace-without-idp` rule.
+
+**Zero Config is not in the documented API, and this is the thing to
+know.** Grandstream's HTTPS API reference enumerates every action the
+appliance answers — extensions, trunks, routes, queues, call control —
+and none of them returns Zero Config's inventory; the web UI reaches it
+by a route outside the documented API. Two independent readings of the
+reference agree, and the 221-page PDF guide's action list agrees.
+
+So `zero_config_action` is configuration with a documented guess
+(`listZeroConfig`) as its default, and the failure mode is the load-
+bearing part: a firmware that does not answer produces a **partial**
+snapshot naming the action tried and the status returned. Nothing is
+tombstoned, no handset is invented, and the fix is a line of TOML. The
+device payload's field names are undocumented for the same reason, so
+`device_envelope` tries the plausible spellings of each attribute rather
+than trusting one, and a row whose MAC cannot be found is skipped with a
+warning naming the fields it did have — an entity with no stable key
+cannot survive to the next sweep, and inventing one would re-provision
+the fleet on every read.
+
+**The allowlist is thinner here than for a REST vendor, and the docs say
+so.** The whole UCM API is `POST /api` with the verb in the body, so a
+method-and-path allowlist cannot separate reading an extension from
+editing one. What does separate them: `api.rs` is the only place a
+request body is built, it names four actions, none mutates, and
+`ReadMethod` still cannot spell `PUT` or `DELETE`. Stating the weaker
+guarantee is better than implying the stronger one.
+
+Secrets are stripped by field *name*, recursively — anything ending in
+`secret` or `password` becomes `<field>_len`. A fixed list would have let
+the next firmware's new secret into a plaintext SQLite file kept forever
+before anybody noticed. `has_secret` and `secret_len` are enough to write
+"this extension has a four-character SIP password" without storing it.
+
+MAC addresses normalize to bare lowercase hex. Vendors are inconsistent
+about case and separators, and a firmware upgrade that switched spelling
+would otherwise deprovision every handset and provision it again.
+
+Tested: the handshake in order; extensions normalized through the shipped
+ruleset; `out_of_service` beating a healthy `status`; `Unavailable`
+mapping to `unknown` rather than a claim of deprovisioning; secrets never
+reaching the observation at three nesting depths; detail off by default
+and one detail failure degrading to partial rather than failing the
+system; an empty extension list treated as a failure rather than a
+tombstone sweep; a refused login reported with the UCM's own status; the
+device path through both the default and a configured action and list
+key; an unanswered action staying partial with the knob named in the
+warning; a MAC-less row skipped; every non-`/api` path refused before any
+call; and `base_url` missing reported as itself.
+
+`cargo test --workspace`: 358 passing. `clippy -D warnings` and
+`fmt --check`: clean.
+
+### 2026-09-21 — UCM connector: first contact with a real UCM6308A
+
+Three defects, all found by pointing it at the appliance.
+
+**The options list was wrong.** `listAccount` returns only the columns
+named in `options`, and I had assumed an unknown name would come back
+absent. It does not: one undocumented field fails the whole call with
+invalid parameters. The list carried two — `secret` and `department` —
+so every extension in the system was lost to a speculative field name.
+Trimmed to exactly the documented set. `secret` had no business being
+there anyway: it was requested and then redacted on arrival, which is a
+SIP password crossing the wire for no reason. Its length reaches the
+overlay through `detail` instead.
+
+**Paging values were sent as JSON numbers.** The vendor's own examples
+spell them as strings (`"page": "1"`), and a firmware that accepts one
+and not the other is indistinguishable until it answers invalid
+parameters. Both the extension and device reads now send strings.
+
+**A read that got nothing reported `partial` instead of failing.** This
+is the one that made the other two hard to diagnose: a partial snapshot
+of zero extensions reads as "the sweep worked and found nothing", which
+is the only thing that had not happened. The UniFi connector already had
+the right convention in `require_something` — nothing read *and*
+something wrong is a failed system, not a partial one — and this now
+follows it. Zero Config keeps the opposite treatment for an empty list
+with no error, because a UCM with no provisioned handsets is a real
+answer rather than a failed read.
+
+Also: a rejected `listAccount` now names the fields it asked for, and
+status codes carry their documented meaning where Grandstream publishes
+one (-1, -5, -6, -8, -37, -45). `-47`, which is what a wrong API user
+produced, is documented nowhere — not in the reference, the 221-page
+guide, or the forums — so it is reported as the number it is, with the
+failing action named. Which action failed is most of the diagnosis: the
+challenge is unauthenticated, so a failure there is about the API user
+existing, while a failure at login is about the password.
+
+Tested: the request shape asserted field by field against the documented
+option list, so a speculative name cannot be added back silently; paging
+values asserted as strings; the rejected-options path asserted to fail
+the system and name what it sent; an empty Zero Config list asserted to
+stay complete.
+
+`cargo test --workspace`: 363 passing. `clippy -D warnings` and
 `fmt --check`: clean.

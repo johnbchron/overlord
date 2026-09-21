@@ -1,0 +1,42 @@
+{
+  "id": "grandstream-ucm-extension",
+  "version": "1",
+  "system_kind": "sso",
+  "entity_type": "phone-extension",
+  "entity_key": { "path": "account.extension" },
+  "display_name": { "path": "account.fullname" },
+  "status": {
+    "when": [
+      { "path": "account.out_of_service", "map": { "1": "suspended", "true": "suspended" } },
+      { "path": "account.status", "map": {
+        "Idle": "active",
+        "Busy": "active",
+        "Ringing": "active",
+        "Hold": "active",
+        "Unavailable": "unknown",
+        "Unmonitored": "unknown"
+      } }
+    ],
+    "default": "unknown"
+  },
+  "fields": {
+    "extension": { "path": "account.extension", "as": "string" },
+    "account_type": { "path": "account.account_type", "as": "string" },
+    "registration": { "path": "account.addr", "as": "string" },
+    "presence_status": { "path": "account.presence_status", "as": "string" },
+    "presence_script": { "path": "account.presence_def_script", "as": "string" },
+    "email": { "path": "account.email_to_user", "as": "string" },
+    "username": { "path": "account.user_name", "as": "string" },
+    "new_voicemail": { "path": "account.newmsg", "as": "number" },
+    "old_voicemail": { "path": "account.oldmsg", "as": "number" },
+    "has_secret": { "path": "has_secret", "as": "boolean" },
+    "secret_len": { "path": "detail.secret_len", "as": "number" },
+    "voicemail_secret_len": { "path": "detail.vmsecret_len", "as": "number" },
+    "has_voicemail": { "path": "detail.hasvoicemail", "as": "boolean" },
+    "permission": { "path": "detail.permission", "as": "string" },
+    "caller_id_number": { "path": "detail.cidnumber", "as": "string" },
+    "dnd": { "path": "detail.dnd", "as": "boolean" },
+    "nat": { "path": "detail.nat", "as": "boolean" },
+    "codecs": { "path": "detail.allow", "as": "string" }
+  }
+}

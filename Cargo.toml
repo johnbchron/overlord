@@ -16,6 +16,7 @@ overlord-connect = { path = "crates/overlord-connect" }
 overlord-connector-fixture = { path = "crates/overlord-connector-fixture" }
 overlord-connector-gworkspace = { path = "crates/overlord-connector-gworkspace" }
 overlord-connector-unifi-access = { path = "crates/overlord-connector-unifi-access" }
+overlord-connector-grandstream-ucm = { path = "crates/overlord-connector-grandstream-ucm" }
 overlord-engine = { path = "crates/overlord-engine" }
 overlord-web = { path = "crates/overlord-web" }
 
@@ -28,6 +29,11 @@ regex = "1"
 rusqlite = { version = "0.37", features = ["bundled", "blob"] }
 rusqlite_migration = "2"
 blake3 = "1"
+# The UCM's login is challenge/MD5(challenge+password). MD5 is the
+# vendor's choice of protocol, not a security decision of ours: it
+# hashes a challenge for authentication against one appliance, and
+# nothing in overlord stores or compares digests with it.
+md-5 = "0.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive"] }

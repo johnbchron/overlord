@@ -1,0 +1,84 @@
+# A Grandstream UCM6308A, read twice: once for extensions, once for
+# Zero Config handsets.
+#
+#   export OVERLORD_UCM_PASSWORD='...'
+#   cargo run -- -c examples/grandstream-ucm.toml sweep
+#
+# The API user is created on the appliance under System Settings →
+# HTTPS API. Its password comes from the environment and never from this
+# file (SPEC.md section 14).
+
+[store]
+path = "overlord.db"
+
+[sweep]
+absence_guard_pct = 10
+
+# A handset is not a person. Without this, every unlinked phone-device
+# becomes an implicit singleton person: one row per handset on the Users
+# roster, and a few hundred subjects handed to every person-scoped check
+# that declared no scope (SPEC.md section 6.4).
+#
+# phone-extension is deliberately NOT here. An extension belongs to
+# somebody — it carries their name and their email — so it should link
+# to a person like any other account.
+[identity]
+non_person_entity_types = ["phone-device"]
+
+# --- extensions -------------------------------------------------------
+#
+# One appliance is two systems because overlord normalizes one entity
+# type per system. They also fail independently, which matters here:
+# Zero Config is the half that may not answer.
+
+[[systems]]
+id = "ucm-extensions"
+connector = "grandstream-ucm"
+
+[systems.config]
+base_url = "https://10.0.0.5:8089"
+username = "cdrapi"
+credentials_env = "OVERLORD_UCM_PASSWORD"
+mode = "extensions"
+
+# One extra call per extension, for the fields listAccount does not
+# carry: voicemail, permissions, codecs, and the length of the SIP
+# secret. Off by default; turn it on if a check needs them.
+detail = false
+
+# A UCM signs its own certificate for :8089. ca_cert is the right answer
+# when there is a certificate to trust; tls_insecure gives up knowing
+# which host answered, and is the last resort.
+# ca_cert = "/etc/overlord/ucm-ca.pem"
+tls_insecure = true
+
+# --- zero config devices ----------------------------------------------
+#
+# Grandstream documents no API action that returns Zero Config's
+# inventory — the published reference enumerates extensions, trunks,
+# routes, queues and call control, and nothing else. The action name is
+# therefore configuration, and the default below is a guess that follows
+# the vendor's naming for every documented list.
+#
+# If the firmware does not answer it, the sweep records a PARTIAL
+# snapshot naming the action it tried and the status it got back.
+# Nothing is tombstoned and no handset is invented; correct the name
+# here and sweep again.
+
+[[systems]]
+id = "ucm-devices"
+connector = "grandstream-ucm"
+
+[systems.config]
+base_url = "https://10.0.0.5:8089"
+username = "cdrapi"
+credentials_env = "OVERLORD_UCM_PASSWORD"
+mode = "devices"
+
+zero_config_action = "listZeroConfig"
+# The response field holding the device array. Omitted means "infer it",
+# which succeeds only when the response carries exactly one array of
+# objects — it will not guess between two.
+# zero_config_list_key = "zero_config"
+
+tls_insecure = true

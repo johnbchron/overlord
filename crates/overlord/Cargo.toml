@@ -16,6 +16,7 @@ overlord-connect.workspace = true
 overlord-connector-fixture.workspace = true
 overlord-connector-gworkspace.workspace = true
 overlord-connector-unifi-access.workspace = true
+overlord-connector-grandstream-ucm.workspace = true
 overlord-engine.workspace = true
 overlord-expr.workspace = true
 overlord-store.workspace = true

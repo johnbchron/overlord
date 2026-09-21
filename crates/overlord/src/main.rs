@@ -13,6 +13,7 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use overlord_connect::Registry;
 use overlord_connector_fixture::FixtureConnector;
+use overlord_connector_grandstream_ucm::GrandstreamUcmConnector;
 use overlord_connector_gworkspace::GoogleWorkspaceConnector;
 use overlord_connector_unifi_access::UnifiAccessConnector;
 use overlord_core::{
@@ -360,6 +361,7 @@ fn registry() -> Registry {
     .with(FixtureConnector::boxed())
     .with(GoogleWorkspaceConnector::boxed())
     .with(UnifiAccessConnector::boxed())
+    .with(GrandstreamUcmConnector::boxed())
 }
 
 fn append(

@@ -5,7 +5,7 @@ path = "overlord.db"
 absence_guard_pct = 10
 
 [identity]
-non_person_entity_types = [  ]
+non_person_entity_types = [ "phone-device" ]
 
 [server]
 bind = "127.0.0.1:3000"
@@ -33,3 +33,18 @@ impersonate = "jblewis@liveoakclassical.com"
 credentials_env = "OVERLORD_GWS_CREDENTIALS"
 
 groups = true
+
+[[systems]]
+connector = "grandstream-ucm"
+id = "ucm-extensions"
+
+[systems.config]
+base_url = "https://192.168.0.51:8089"
+mode = "extensions"
+
+credentials_env = "OVERLORD_UCM_PASSWORD"
+username = "cdrapi"
+
+detail = true
+
+tls_insecure = true

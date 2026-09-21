@@ -1,0 +1,29 @@
+{
+  "id": "grandstream-ucm-device",
+  "version": "1",
+  "system_kind": "mdm",
+  "entity_type": "phone-device",
+  "entity_key": { "path": "mac" },
+  "display_name": { "path": "model" },
+  "status": {
+    "when": [
+      { "path": "device.status", "map": {
+        "0": "unknown",
+        "1": "active",
+        "Online": "active",
+        "online": "active",
+        "Offline": "suspended",
+        "offline": "suspended"
+      } }
+    ],
+    "default": "unknown"
+  },
+  "fields": {
+    "mac": { "path": "mac", "as": "string" },
+    "model": { "path": "model", "as": "string" },
+    "vendor": { "path": "vendor", "as": "string" },
+    "firmware_version": { "path": "firmware", "as": "string" },
+    "ip_address": { "path": "ip", "as": "string" },
+    "extension": { "path": "extension", "as": "string" }
+  }
+}
