@@ -564,6 +564,22 @@ impl Writer<'_> {
         )?;
         Ok(())
       }
+
+      CommandKind::IdentityPolicy {
+        non_person_entity_types,
+      } => {
+        // One row, replaced. The policy is current state; its history
+        // is the command stream this is projected from.
+        self.conn().execute(
+          "INSERT INTO identity_policy (id, non_person_types, command_id)
+           VALUES (1, ?1, ?2)
+           ON CONFLICT (id) DO UPDATE SET
+             non_person_types = excluded.non_person_types,
+             command_id = excluded.command_id",
+          params![serde_json::to_string(non_person_entity_types)?, id],
+        )?;
+        Ok(())
+      }
     }
   }
 

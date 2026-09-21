@@ -2,9 +2,9 @@
 //! section 13); nothing here touches the streams except to show history.
 
 use overlord_core::{
-  CheckDraft, CheckId, CheckRecord, EntityRef, EntityStatus, NormalizedRecord,
-  PersonUid, Revision, Severity, SubjectKind, SubjectRef, SweepId, SystemId,
-  Timestamp, ViolationState,
+  CheckDraft, CheckId, CheckRecord, EntityRef, EntityStatus, EntityType,
+  NormalizedRecord, PersonUid, Revision, Severity, SubjectKind, SubjectRef,
+  SweepId, SystemId, Timestamp, ViolationState,
 };
 use rusqlite::{OptionalExtension, params};
 
@@ -813,6 +813,16 @@ impl Reader<'_> {
                 AND l.entity_key = e.entity_key
           WHERE e.present = 1 AND e.normalized IS NOT NULL
             AND l.person_uid IS NULL
+            -- The same policy evaluation applies (SPEC.md s6.4): a
+            -- type that is not a person is not an implicit person
+            -- here either, or the roster would list subjects no
+            -- person-scoped check was run against. An absent row
+            -- leaves the subquery empty, which admits everything.
+            AND e.entity_type NOT IN (
+              SELECT j.value
+                FROM identity_policy p, json_each(p.non_person_types) j
+               WHERE p.id = 1
+            )
        )
        SELECT subject.uid, coalesce(s.score, 0),
               coalesce(s.violation_count, 0), s.worst_severity,
@@ -1082,6 +1092,38 @@ impl Reader<'_> {
       out.insert(SystemId::new(system), connector);
     }
     Ok(out)
+  }
+
+  /// The entity types that are not people (SPEC.md section 6.4).
+  ///
+  /// Read from the projection rather than from `overlord.toml` for the
+  /// same reason [`Self::system_connectors`] is: this decides which
+  /// subjects evaluation sees, and a replay has no configuration file.
+  /// The configuration is the authoring surface; an `identity.policy`
+  /// command is what evaluation actually reads.
+  ///
+  /// Empty until the first such command, which is the behaviour every
+  /// store had before the policy existed.
+  ///
+  /// # Errors
+  /// On a SQLite failure, or if the stored JSON is not an array of
+  /// entity types — which would mean a command this binary cannot
+  /// understand, and is not something to paper over with a default.
+  pub fn non_person_entity_types(
+    &self,
+  ) -> Result<std::collections::BTreeSet<EntityType>> {
+    let json: Option<String> = self
+      .conn()
+      .query_row(
+        "SELECT non_person_types FROM identity_policy WHERE id = 1",
+        [],
+        |r| r.get(0),
+      )
+      .optional()?;
+    let Some(json) = json else {
+      return Ok(std::collections::BTreeSet::new());
+    };
+    Ok(serde_json::from_str(&json)?)
   }
 }
 

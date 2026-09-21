@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 use crate::{
   check::{CheckDraft, DryrunSample},
   ids::{
-    Actor, CheckId, EntityRef, PersonUid, Revision, Seq, SubjectRef, SystemId,
-    SystemKind,
+    Actor, CheckId, EntityRef, EntityType, PersonUid, Revision, Seq,
+    SubjectRef, SystemId, SystemKind,
   },
   time::Timestamp,
   violation::SuppressReason,
@@ -112,9 +112,42 @@ pub enum CommandKind {
     version:     String,
     body:        serde_json::Value,
   },
+
+  /// Declare which entity types are not people (SPEC.md section 6.4).
+  ///
+  /// Authored in the configuration file, but recorded here because it
+  /// decides which subjects evaluation sees, and section 13 admits no
+  /// input to evaluation outside the two streams. The whole set travels
+  /// in each command rather than a delta: the projection is current
+  /// state, so a command that carried only what changed would leave
+  /// replay dependent on reading every prior one correctly.
+  ///
+  /// Sorted and deduplicated on construction, so an unchanged policy
+  /// spelled in a different order is recognisably unchanged and appends
+  /// nothing.
+  #[serde(rename = "identity.policy")]
+  IdentityPolicy {
+    non_person_entity_types: Vec<EntityType>,
+  },
 }
 
 impl CommandKind {
+  /// An [`Self::IdentityPolicy`] with its set put in canonical order.
+  ///
+  /// Sorting and deduplicating here rather than at the call site is
+  /// what lets the caller decide "has this changed?" by comparing the
+  /// set to the projection: two spellings of the same policy must not
+  /// append a command, or every sweep would append one.
+  #[must_use]
+  pub fn identity_policy(types: impl IntoIterator<Item = EntityType>) -> Self {
+    let mut v: Vec<EntityType> = types.into_iter().collect();
+    v.sort();
+    v.dedup();
+    Self::IdentityPolicy {
+      non_person_entity_types: v,
+    }
+  }
+
   /// The `command.kind` column value.
   #[must_use]
   pub fn tag(&self) -> &'static str {
@@ -134,6 +167,7 @@ impl CommandKind {
       Self::CheckEnable { .. } => "check.enable",
       Self::CheckDisable { .. } => "check.disable",
       Self::NormalizationUpsert { .. } => "normalization.upsert",
+      Self::IdentityPolicy { .. } => "identity.policy",
     }
   }
 
@@ -163,6 +197,10 @@ impl CommandKind {
       | Self::CheckEnable { check_id, .. }
       | Self::CheckDisable { check_id } => Some(check_id.to_string()),
       Self::NormalizationUpsert { ruleset_id, .. } => Some(ruleset_id.clone()),
+      // A fixed subject rather than none: the policy is a single
+      // standing object, and "everything that touched it" is the
+      // question the `command_subject` index exists to answer.
+      Self::IdentityPolicy { .. } => Some("identity.policy".to_owned()),
     }
   }
 
@@ -368,11 +406,40 @@ mod tests {
         version:     "3".to_owned(),
         body:        serde_json::json!({"status": {"suspended": "suspended"}}),
       },
+      CommandKind::identity_policy([EntityType::new("phone")]),
     ];
     for k in &kinds {
       assert_eq!(&round_trip(k), k, "{}", k.tag());
       assert!(k.subject().is_some(), "{} has no subject", k.tag());
     }
+  }
+
+  #[test]
+  fn an_identity_policy_is_sorted_and_deduplicated() {
+    // The caller decides "has this changed?" by comparing the set to
+    // the projection. Two spellings of one policy must compare equal,
+    // or every invocation would append a command and the stream would
+    // fill with changes that changed nothing.
+    let a = CommandKind::identity_policy([
+      EntityType::new("phone"),
+      EntityType::new("device"),
+      EntityType::new("phone"),
+    ]);
+    let b = CommandKind::identity_policy([
+      EntityType::new("device"),
+      EntityType::new("phone"),
+    ]);
+    assert_eq!(a, b);
+    let CommandKind::IdentityPolicy {
+      non_person_entity_types,
+    } = &a
+    else {
+      panic!("wrong variant");
+    };
+    assert_eq!(non_person_entity_types, &[
+      EntityType::new("device"),
+      EntityType::new("phone")
+    ]);
   }
 
   #[test]

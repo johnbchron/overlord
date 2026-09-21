@@ -185,6 +185,18 @@ async fn main() -> Result<()> {
   let actor = Actor::new(format!("cli:{}", cli.actor));
   let now = Timestamp::now();
 
+  // Reconcile the file's identity policy into the stream before anything
+  // reads it. Here rather than inside the sweep because the Users roster
+  // honours the same policy, so a `serve` that never swept would
+  // otherwise show a roster the configuration disagrees with. A no-op
+  // when nothing changed, so it costs a read per invocation.
+  overlord_engine::sync_identity_policy(
+    &db,
+    &cfg.identity.non_person_entity_types,
+    &actor,
+    now,
+  )?;
+
   match cli.command {
     Command::Sweep { systems } => {
       if cfg.systems.is_empty() {

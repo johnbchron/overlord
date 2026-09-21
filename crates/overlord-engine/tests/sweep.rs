@@ -683,8 +683,9 @@ async fn replaying_the_streams_reproduces_the_live_projections() {
 
 /// Every projection row, as stable sorted text.
 fn dump(db: &Db) -> Vec<String> {
-  const TABLES: [&str; 8] = [
+  const TABLES: [&str; 9] = [
     "entity",
+    "identity_policy",
     "person",
     "person_alias",
     "link",
@@ -1119,4 +1120,185 @@ async fn a_dry_run_honours_suppress_if_pending_links() {
     "pending links must narrow the dry-run: {quiet:?} vs {loud:?}"
   );
   assert!(quiet.match_count < loud.match_count, "{quiet:?}");
+}
+
+// --- identity policy (SPEC.md section 6.4) ----------------------------
+
+fn phones() -> SystemConfig { system("voip", "phones.json", 0) }
+
+/// A person check that every implicit singleton answers `true` to.
+///
+/// Deliberately unscoped, because that is the case the policy exists
+/// for: a rule written about accounts, with no `entity_types` on it,
+/// which a fleet of handsets would otherwise each be handed.
+fn no_idp() -> CheckDraft {
+  draft(
+    "no-idp",
+    "not has_entity(\"idp\")",
+    Severity::High,
+    SubjectKind::Person,
+  )
+}
+
+fn not_active() -> CheckDraft {
+  draft(
+    "phone-not-active",
+    "status != \"active\"",
+    Severity::Medium,
+    SubjectKind::Entity,
+  )
+}
+
+fn set_policy(db: &Db, types: &[&str]) {
+  overlord_engine::sync_identity_policy(
+    db,
+    &types
+      .iter()
+      .map(|t| overlord_core::EntityType::new(*t))
+      .collect::<Vec<_>>(),
+    &actor(),
+    ts(NOW),
+  )
+  .unwrap();
+}
+
+fn open_subjects(db: &Db, check: &str) -> Vec<String> {
+  let mut v = db
+    .read(|r| -> overlord_store::Result<_> {
+      r.violations(&[ViolationState::Open, ViolationState::Acknowledged], 500)
+    })
+    .unwrap()
+    .into_iter()
+    .filter(|v| v.check_id.as_str() == check)
+    .map(|v| v.subject.to_string())
+    .collect::<Vec<_>>();
+  v.sort();
+  v
+}
+
+#[tokio::test]
+async fn without_a_policy_every_handset_is_its_own_implicit_person() {
+  // The behaviour the policy exists to change, asserted first so the
+  // test below is a difference rather than a claim.
+  let db = Db::open_memory().unwrap();
+  install(&db, &no_idp());
+  sweep(&db, &plan(vec![phones()], NOW)).await;
+
+  assert_eq!(
+    open_subjects(&db, "no-idp").len(),
+    3,
+    "an unscoped person check should reach all three handsets"
+  );
+}
+
+#[tokio::test]
+async fn a_non_person_type_is_not_an_implicit_person() {
+  let db = Db::open_memory().unwrap();
+  install(&db, &no_idp());
+  install(&db, &not_active());
+  set_policy(&db, &["phone"]);
+
+  sweep(&db, &plan(vec![phones()], NOW)).await;
+
+  assert!(
+    open_subjects(&db, "no-idp").is_empty(),
+    "handsets are not people, so a person check must not reach them"
+  );
+  // The other half of the point: they are still subjects, just not
+  // person-shaped ones.
+  assert_eq!(
+    open_subjects(&db, "phone-not-active"),
+    vec!["entity/voip/phone/SEP001A2B3C4D03".to_owned()],
+    "an entity check must still fire on the handset that is not active"
+  );
+}
+
+#[tokio::test]
+async fn turning_the_policy_on_resolves_the_violations_it_orphans() {
+  // Otherwise the board would keep three open person violations whose
+  // subjects evaluation no longer builds, and nothing would ever clear
+  // them.
+  let db = Db::open_memory().unwrap();
+  install(&db, &no_idp());
+  sweep(&db, &plan(vec![phones()], NOW)).await;
+  assert_eq!(open_subjects(&db, "no-idp").len(), 3);
+
+  set_policy(&db, &["phone"]);
+  sweep(&db, &plan(vec![phones()], "2026-02-02T00:00:00Z")).await;
+
+  assert!(open_subjects(&db, "no-idp").is_empty());
+  let reason: String = db
+    .read(|r| -> overlord_store::Result<_> {
+      Ok(r.conn().query_row(
+        "SELECT resolve_reason FROM violation WHERE check_id = 'no-idp'
+          LIMIT 1",
+        [],
+        |row| row.get(0),
+      )?)
+    })
+    .unwrap();
+  assert_eq!(reason, "subject_absent");
+}
+
+#[tokio::test]
+async fn a_policy_that_did_not_change_appends_nothing() {
+  // The reconcile runs on every invocation. If a steady state appended
+  // a command, the stream would fill with changes that changed nothing
+  // and the policy's own history would be unreadable.
+  let db = Db::open_memory().unwrap();
+  assert!(
+    overlord_engine::sync_identity_policy(
+      &db,
+      &[overlord_core::EntityType::new("phone")],
+      &actor(),
+      ts(NOW),
+    )
+    .unwrap()
+  );
+
+  for spelling in [vec!["phone"], vec!["phone"]] {
+    assert!(
+      !overlord_engine::sync_identity_policy(
+        &db,
+        &spelling
+          .iter()
+          .map(|t| overlord_core::EntityType::new(*t))
+          .collect::<Vec<_>>(),
+        &actor(),
+        ts(NOW),
+      )
+      .unwrap(),
+      "an unchanged policy must not append"
+    );
+  }
+
+  let n: i64 = db
+    .read(|r| -> overlord_store::Result<_> {
+      Ok(r.conn().query_row(
+        "SELECT count(*) FROM command WHERE kind = 'identity.policy'",
+        [],
+        |row| row.get(0),
+      )?)
+    })
+    .unwrap();
+  assert_eq!(n, 1);
+}
+
+#[tokio::test]
+async fn the_policy_replays_with_everything_else() {
+  // SPEC.md section 13: the policy decides which subjects exist, so if
+  // it did not replay, `replay(streams) == live` would be false for
+  // every store that used one.
+  let db = Db::open_memory().unwrap();
+  install(&db, &no_idp());
+  install(&db, &not_active());
+
+  sweep(&db, &plan(vec![phones()], NOW)).await;
+  set_policy(&db, &["phone"]);
+  sweep(&db, &plan(vec![phones()], "2026-02-02T00:00:00Z")).await;
+
+  let before = dump(&db);
+  assert!(before.iter().any(|r| r.starts_with("identity_policy:")));
+  overlord_engine::rebuild(&db).unwrap();
+  assert_eq!(dump(&db), before, "replay(streams) must equal live");
 }

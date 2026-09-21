@@ -39,6 +39,16 @@ impl World {
   /// is by definition unlinked, so without this the check that finds
   /// them could never fire.
   ///
+  /// Except for the types an `identity.policy` command says are not
+  /// people. That reasoning is about *accounts*: a device has no
+  /// counterpart to be missing, and an implicit singleton over one
+  /// holds exactly the entity an entity-scoped check already sees. What
+  /// it would add is a subject on the Users roster per handset, and a
+  /// few hundred subjects handed to every person check that declared no
+  /// scope. An entity of such a type is still evaluated by
+  /// entity-scoped checks, and still becomes a member of a real person
+  /// once one is confirmed for it.
+  ///
   /// # Errors
   /// On a store failure.
   pub fn load(r: &Reader<'_>) -> Result<Self> {
@@ -66,8 +76,15 @@ impl World {
       }
     }
 
+    // Which types are not people. Read from the projection, never from
+    // the configuration file, for the same reason `connectors` is: this
+    // decides which subjects exist, and a replay has no TOML to consult
+    // (SPEC.md section 13).
+    let non_person = r.non_person_entity_types()?;
     for (entity, &idx) in &w.by_ref {
-      if !linked.contains_key(entity) {
+      if !linked.contains_key(entity)
+        && !non_person.contains(&entity.entity_type)
+      {
         w.members
           .entry(PersonUid::implicit(entity))
           .or_default()

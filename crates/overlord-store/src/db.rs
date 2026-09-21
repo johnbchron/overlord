@@ -16,6 +16,7 @@ fn migrations() -> Migrations<'static> {
   Migrations::new(vec![
     M::up(include_str!("sql/0001_initial.sql")),
     M::up(include_str!("sql/0002_system_connector.sql")),
+    M::up(include_str!("sql/0003_identity_policy.sql")),
   ])
 }
 

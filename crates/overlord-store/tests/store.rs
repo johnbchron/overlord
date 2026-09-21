@@ -766,3 +766,104 @@ fn a_system_moved_to_another_connector_is_scoped_by_the_current_one() {
   assert_eq!(map[&SystemId::new("access-hq")], "unifi-v2");
   assert_eq!(map.len(), 1, "one row per system, not one per sweep");
 }
+
+// --- identity policy (SPEC.md section 6.4) ----------------------------
+
+fn phone_fact(key: &str) -> NewFact {
+  let n = NormalizedRecord::new(
+    "voip",
+    SystemKind::Mdm,
+    "phone",
+    key,
+    EntityStatus::Active,
+  );
+  NewFact {
+    system:       SystemId::new("voip"),
+    entity_type:  EntityType::new("phone"),
+    entity_key:   EntityKey::new(key),
+    observed_at:  ts(T0),
+    raw:          Some(serde_json::json!({ "key": key })),
+    normalized:   Some(n),
+    norm_version: "fixture/1".to_owned(),
+  }
+}
+
+#[test]
+fn a_non_person_type_is_kept_off_the_users_roster() {
+  let db = db();
+  let s = sweep(&db, T0);
+  db.write(|w| {
+    w.append_facts(s, &[
+      user_fact("ada@x.com", EntityStatus::Active, true),
+      phone_fact("SEP0001"),
+      phone_fact("SEP0002"),
+    ])
+  })
+  .unwrap();
+  db.write(|w| w.commit_sweep(s, SweepStatus::Ok, ts(T0)))
+    .unwrap();
+
+  // Without a policy every unlinked entity is an implicit person, which
+  // is the behaviour orphan-account checks depend on.
+  assert_eq!(
+    db.read(|r| r.all_subjects(SubjectFilter::Everyone, 50))
+      .unwrap()
+      .len(),
+    3
+  );
+
+  db.write(|w| {
+    w.append_command(&cmd(
+      CommandKind::identity_policy([EntityType::new("phone")]),
+      T1,
+    ))
+  })
+  .unwrap();
+
+  let rows = db
+    .read(|r| r.all_subjects(SubjectFilter::Everyone, 50))
+    .unwrap();
+  let uids: Vec<&str> = rows.iter().map(|r| r.person_uid.as_str()).collect();
+  assert_eq!(uids, vec!["implicit:gws-prod/user/ada@x.com"]);
+}
+
+#[test]
+fn the_policy_is_read_back_as_the_set_it_was_written_with() {
+  let db = db();
+  assert!(
+    db.read(|r| r.non_person_entity_types()).unwrap().is_empty(),
+    "a store with no policy command admits every type, which is what every \
+     store did before the policy existed"
+  );
+
+  db.write(|w| {
+    w.append_command(&cmd(
+      CommandKind::identity_policy([
+        EntityType::new("phone"),
+        EntityType::new("device"),
+      ]),
+      T0,
+    ))
+  })
+  .unwrap();
+  assert_eq!(
+    db.read(|r| r.non_person_entity_types()).unwrap(),
+    [EntityType::new("device"), EntityType::new("phone")]
+      .into_iter()
+      .collect()
+  );
+
+  // One row, replaced: the policy is current state, and its history is
+  // the command stream rather than an accumulation here.
+  db.write(|w| {
+    w.append_command(&cmd(
+      CommandKind::identity_policy([EntityType::new("phone")]),
+      T1,
+    ))
+  })
+  .unwrap();
+  assert_eq!(
+    db.read(|r| r.non_person_entity_types()).unwrap(),
+    [EntityType::new("phone")].into_iter().collect()
+  );
+}

@@ -80,7 +80,15 @@ pub fn recompute_suggestions(w: &Writer<'_>, sweep: SweepId) -> Result<usize> {
   let mut offers: BTreeMap<EntityRef, BTreeMap<Signal, Offer>> =
     BTreeMap::new();
   let mut kinds: BTreeMap<EntityRef, SystemKind> = BTreeMap::new();
+  // A type that is not a person is left out of the index entirely, so
+  // it neither proposes a link nor is proposed as one. Suggesting that
+  // two handsets be unified into a person would be offering the
+  // operator a confirmation that contradicts the policy.
+  let non_person = r.non_person_entity_types()?;
   for state in r.entity_states(None)? {
+    if non_person.contains(&state.entity.entity_type) {
+      continue;
+    }
     kinds.insert(state.entity.clone(), state.normalized.system_kind);
     let mut mine = BTreeMap::new();
     for signal in Signal::ALL {

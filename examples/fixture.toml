@@ -22,6 +22,22 @@ path = "overlord.db"
 [sweep]
 absence_guard_pct = 10
 
+# Entity types that are not people (SPEC.md section 6.4).
+#
+# Every unlinked entity is otherwise evaluated as an implicit singleton
+# person, which is what lets orphan-account checks fire before any
+# linking has happened. A handset is not an orphan account: naming its
+# type here keeps a fleet of them off the Users roster and out of
+# person-scoped checks, while entity-scoped checks over them are
+# untouched.
+#
+# Editing this appends an `identity.policy` command on the next run, so
+# evaluation reads the stream rather than this file and a replay stays
+# exact. The change takes effect at the next sweep, which also resolves
+# the violations it orphans.
+[identity]
+non_person_entity_types = []
+
 # Uncomment for real authentication (SPEC.md section 14). The client
 # secret comes from OVERLORD_OIDC_CLIENT_SECRET and never from this file.
 # Set OVERLORD_SESSION_KEY to 64 hex characters so sessions survive a

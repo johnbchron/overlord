@@ -23,8 +23,12 @@ pub async fn show(
   identity: Identity,
   State(state): State<AppState>,
 ) -> Result<Response> {
-  let (rulesets, counts) = state.db.read(|r| -> Result<_> {
-    Ok((r.normalization_rulesets()?, r.counts()?))
+  let (rulesets, counts, non_person) = state.db.read(|r| -> Result<_> {
+    Ok((
+      r.normalization_rulesets()?,
+      r.counts()?,
+      r.non_person_entity_types()?,
+    ))
   })?;
 
   let content = html! {
@@ -131,6 +135,36 @@ pub async fn show(
               }
             }
           }
+        }
+      }
+    }
+
+    h2 { "Identity policy" }
+    p class="lede" {
+      "Which entity types are people. Every unlinked entity is otherwise        evaluated as an implicit singleton person, which is what lets        orphan-account checks fire before any linking has happened."
+    }
+    div class="panel" {
+      div class="panel-body" {
+        @if non_person.is_empty() {
+          p class="muted" {
+            "Every entity type is treated as a person. Set "
+            code { "[identity] non_person_entity_types" }
+            " in the configuration file to exclude a type — devices, for              instance, which have no counterpart account to be missing."
+          }
+        } @else {
+          p {
+            "These types are not people. They are still collected and              still evaluated by entity-scoped checks; they are simply              never implicit persons, and are not proposed as link              candidates."
+          }
+          p {
+            @for t in &non_person {
+              span class="tag" { (t.as_str()) } " "
+            }
+          }
+        }
+        p class="muted" {
+          "Authored in the configuration file, recorded as an "
+          code { "identity.policy" }
+          " command. Evaluation reads the command, never the file, so a            rebuild reproduces the policy that was live at the time."
         }
       }
     }

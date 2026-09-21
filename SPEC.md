@@ -212,10 +212,14 @@ overlay).
 *Normalization* — `normalization.upsert` (a new ruleset revision for a system
 kind, keyed by id and version).
 
-Checks and normalization rulesets are configuration **and** operational state:
-because they determine what the board says, they live in the command stream with
-everything else. Connector credentials and endpoints remain external
-configuration, because they do not affect evaluation.
+*Identity policy* — `identity.policy` (the entity types that are not people, see
+section 6.4). Authored in the configuration file; a change there appends one of
+these, and evaluation reads only the command.
+
+Checks, normalization rulesets and the identity policy are configuration **and**
+operational state: because they determine what the board says, they live in the
+command stream with everything else. Connector credentials and endpoints remain
+external configuration, because they do not affect evaluation.
 
 ### 6.3 Projections (derived, rebuildable)
 
@@ -246,6 +250,23 @@ singleton person** with a derived `person_uid`. This keeps orphan-account checks
 definition unlinked. Implicit persons are visible in the Users view and are
 promoted to real persons on the first confirmed link, carrying their violation
 history with them.
+
+**Not every entity type is a person.** That reasoning is about accounts: a device
+has no counterpart to be missing, and an implicit singleton over one holds
+exactly the entity an entity-scoped check already sees. What it would add is a
+subject on the Users roster per device, and a few hundred subjects handed to
+every person check that declared no scope. The **identity policy** names the
+entity types that are not people. Entities of those types are still collected,
+still evaluated by entity-scoped checks, still shown on their own entity pages,
+and still become members of a real person once one is confirmed for them — they
+are simply never *implicit* people, and are not proposed as link candidates.
+
+The policy is authored in the configuration file, which is the operator's
+natural place for it, but the file is not what evaluation reads: a change there
+appends an `identity.policy` command, and evaluation reads the projection.
+Section 13 admits no input to evaluation outside the two streams, and this
+decides which subjects exist. Turning the policy on resolves the violations it
+orphans with reason `subject_absent`, the same as any subject leaving scope.
 
 A person may hold many entities, potentially several of the same type; the
 operator may designate a **primary** entity per system kind for display and for

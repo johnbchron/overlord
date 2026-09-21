@@ -1,0 +1,18 @@
+{
+  "system_kind": "mdm",
+  "entity_type": "phone",
+  "stages": [
+    {
+      "note": "a small handset fleet, one of them off the current firmware",
+      "records": [
+        { "key": "SEP001A2B3C4D01", "name": "Reception", "state": "active" },
+        { "key": "SEP001A2B3C4D02", "name": "Warehouse", "state": "active" },
+        {
+          "key": "SEP001A2B3C4D03",
+          "name": "Conference Room",
+          "state": "suspended"
+        }
+      ]
+    }
+  ]
+}

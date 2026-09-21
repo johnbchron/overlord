@@ -25,7 +25,7 @@ use crate::{
 /// absence guard tripped, a decision taken with the snapshot in hand —
 /// which is not derivable from the streams and would be lost, not
 /// rebuilt, by clearing it.
-const PROJECTIONS: [&str; 13] = [
+const PROJECTIONS: [&str; 14] = [
   "violation_event",
   "violation",
   "person_score",
@@ -38,6 +38,7 @@ const PROJECTIONS: [&str; 13] = [
   "check_revision",
   "check_head",
   "normalization_ruleset",
+  "identity_policy",
   "entity",
 ];
 

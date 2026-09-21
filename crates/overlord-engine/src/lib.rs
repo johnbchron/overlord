@@ -10,6 +10,7 @@ pub mod checks;
 pub mod error;
 pub mod evaluate;
 pub mod identity;
+pub mod policy;
 pub mod rebuild;
 pub mod sweep;
 pub mod world;
@@ -17,6 +18,7 @@ pub mod world;
 pub use error::{EngineError, Result};
 pub use evaluate::{EvalReport, evaluate_sweep};
 pub use identity::recompute_suggestions;
+pub use policy::sync_identity_policy;
 pub use rebuild::rebuild;
 pub use sweep::{
   SweepOutcome, SweepPlan, SweepProgress, SystemConfig, run_sweep,
