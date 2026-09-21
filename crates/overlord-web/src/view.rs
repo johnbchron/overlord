@@ -69,6 +69,20 @@ pub fn subject_href(subject: &SubjectRef) -> String {
   }
 }
 
+/// A display name that is actually one.
+///
+/// `Some("")` and `Some("   ")` are how a vendor spells an unfilled
+/// field, and they arrive here from two directions: a connector whose
+/// ruleset mapped a blank, and facts already in the store from before
+/// normalization dropped them. Treating either as a name produces a
+/// link with no text — invisible and unclickable — so the check lives
+/// here, at the one point every label passes through, as well as at the
+/// source.
+#[must_use]
+pub fn named(display_name: Option<&str>) -> Option<&str> {
+  display_name.map(str::trim).filter(|n| !n.is_empty())
+}
+
 /// A subject as a link, labelled the way an operator would name it.
 #[must_use]
 pub fn subject(subject: &SubjectRef, display_name: Option<&str>) -> Markup {
@@ -84,7 +98,7 @@ pub fn subject_label(
   subject: &SubjectRef,
   display_name: Option<&str>,
 ) -> String {
-  if let Some(name) = display_name {
+  if let Some(name) = named(display_name) {
     return name.to_owned();
   }
   match subject {
@@ -228,6 +242,40 @@ mod tests {
     let e = EntityRef::new("okta-prod", "user", "ada@example.com");
     let subject = SubjectRef::Person(PersonUid::implicit(&e));
     assert_eq!(subject_label(&subject, None), "okta-prod/ada@example.com");
+  }
+
+  #[test]
+  fn a_blank_display_name_falls_back_instead_of_rendering_nothing() {
+    // The failure this guards is silent: `Some("")` produced
+    // `<a href=...></a>`, a link with no text — invisible in the table
+    // and impossible to click. Whitespace is the same thing with a
+    // vendor's spacing in it.
+    let e = EntityRef::new("ucm-extensions", "phone-extension", "1001");
+    let subj = SubjectRef::Entity(e);
+    for blank in [Some(""), Some("   "), Some("\t\n"), None] {
+      assert_eq!(
+        subject_label(&subj, blank),
+        "ucm-extensions/1001",
+        "{blank:?} should fall back to the ref"
+      );
+      let link = subject(&subj, blank).into_string();
+      assert!(
+        link.contains("ucm-extensions/1001"),
+        "{blank:?} rendered an empty link: {link}"
+      );
+    }
+
+    // And a name with incidental padding is still that name, trimmed.
+    assert_eq!(subject_label(&subj, Some("  Reception  ")), "Reception");
+  }
+
+  #[test]
+  fn named_keeps_only_a_real_name() {
+    assert_eq!(named(Some("Ada")), Some("Ada"));
+    assert_eq!(named(Some(" Ada ")), Some("Ada"));
+    assert_eq!(named(Some("")), None);
+    assert_eq!(named(Some("   ")), None);
+    assert_eq!(named(None), None);
   }
 
   #[test]

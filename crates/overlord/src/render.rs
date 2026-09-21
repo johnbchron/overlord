@@ -139,16 +139,24 @@ fn line(v: &ViolationRow) -> String {
   s
 }
 
+/// A display name that is actually one.
+///
+/// The web UI has the same guard in `view::named`, and for the same
+/// reason: a vendor spells an unfilled field as `null` and as `""`
+/// interchangeably, and a blank one used as a label leaves a row with
+/// nothing in the column that identifies it.
+fn named(display_name: Option<&str>) -> Option<&str> {
+  display_name.map(str::trim).filter(|n| !n.is_empty())
+}
+
 pub fn users(rows: &[ScoreRow]) {
   if rows.is_empty() {
     println!("nobody is carrying risk");
     return;
   }
   for r in rows {
-    let name = r
-      .display_name
-      .clone()
-      .unwrap_or_else(|| r.person_uid.to_string());
+    let name = named(r.display_name.as_deref())
+      .map_or_else(|| r.person_uid.to_string(), ToOwned::to_owned);
     let worst = r.worst_severity.map_or("-", |s| s.as_str());
     println!(
       "  {:>6}  {:<9} {:>3} violations  {}{}",
@@ -246,4 +254,46 @@ pub fn suggestions(rows: &[overlord_store::Suggestion]) {
     println!("      -> {}  ({why})", s.person_uid);
   }
   println!("nothing was linked; suggestions are never applied automatically");
+}
+
+/// The entity browser's rows, as columns an eye can scan.
+///
+/// The widths are measured from the rows in hand rather than fixed: an
+/// entity key is a vendor id, and the difference between an extension
+/// number and a Google user id is two orders of magnitude.
+pub fn entities(rows: &[overlord_store::EntityRow], truncated: bool) {
+  if rows.is_empty() {
+    println!("nothing matches");
+    return;
+  }
+
+  let width = |f: &dyn Fn(&overlord_store::EntityRow) -> String| -> usize {
+    rows.iter().map(|r| f(r).chars().count()).max().unwrap_or(0)
+  };
+  let system = |r: &overlord_store::EntityRow| r.entity.system.to_string();
+  let etype = |r: &overlord_store::EntityRow| r.entity.entity_type.to_string();
+  let key = |r: &overlord_store::EntityRow| r.entity.entity_key.to_string();
+  let (ws, wt, wk) = (width(&system), width(&etype), width(&key));
+
+  for r in rows {
+    let flags = match (r.present, r.violations) {
+      (false, _) => "  absent".to_owned(),
+      (_, 0) => String::new(),
+      (_, n) => format!("  {n} open"),
+    };
+    println!(
+      "  {:<ws$}  {:<wt$}  {:<wk$}  {:<9}  {}{}",
+      system(r),
+      etype(r),
+      key(r),
+      r.status.map_or("-", |s| s.as_str()),
+      // Blank rather than a placeholder: the key is already in the row,
+      // so an unnamed entity is identified either way.
+      named(r.display_name.as_deref()).unwrap_or(""),
+      flags,
+    );
+  }
+  if truncated {
+    println!("\n(truncated; narrow the filters or raise --limit)");
+  }
 }

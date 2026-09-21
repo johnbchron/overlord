@@ -220,6 +220,7 @@ async fn every_screen_is_reachable() {
     ("/sweeps", "the definition of"),
     ("/systems", "overlord never writes to any of them"),
     ("/settings", "What this process loaded"),
+    ("/entities", "Every object overlord has collected"),
     ("/sweep?id=1", "Coverage"),
   ] {
     let html = page(&state, uri).await;
@@ -1185,4 +1186,201 @@ async fn a_pushed_filter_url_loads_as_a_page_and_swaps_as_a_fragment() {
   let board = page(&state, "/violations").await;
   assert!(board.contains(r#"hx-get="/violations""#), "{board}");
   assert!(!board.contains("/violations/rows"), "{board}");
+}
+
+// --- the entity browser -----------------------------------------------
+
+/// The rows alone. The filter controls list every system and connector
+/// in the store by name, so a whole-page assertion about a system being
+/// absent is really an assertion about the dropdown.
+fn rows_of(html: &str) -> String {
+  let Some(start) = html.find("<tbody") else {
+    return String::new();
+  };
+  let end = html[start..]
+    .find("</tbody>")
+    .map_or(html.len(), |e| start + e);
+  html[start..end].to_owned()
+}
+
+#[tokio::test]
+async fn the_entity_browser_lists_what_the_users_roster_leaves_out() {
+  // The reason this screen exists. The roster is person-shaped and the
+  // identity policy keeps non-person types off it; those entities still
+  // have to be reachable somewhere.
+  let state = seeded().await;
+  state
+    .db
+    .write(|w| {
+      w.append_command(&NewCommand::new(
+        Actor::new("cli:test"),
+        CommandKind::identity_policy([EntityType::new("user")]),
+        ts(NOW),
+      ))
+    })
+    .unwrap();
+
+  let roster = page(&state, "/users").await;
+  assert!(!roster.contains("Ada Lovelace"), "policy not in effect");
+
+  let entities = page(&state, "/entities").await;
+  assert!(
+    entities.contains("Ada Lovelace"),
+    "an entity the roster excludes must still be listed here"
+  );
+}
+
+#[tokio::test]
+async fn the_entity_browser_filters_on_each_facet() {
+  let state = seeded().await;
+
+  let all = page(&state, "/entities").await;
+  assert!(all.contains("Ada Lovelace"));
+  // Ada is in both the workspace and the IdP, and the unfiltered list
+  // shows each as its own entity.
+  let all_rows = rows_of(&all);
+  assert!(all_rows.contains("okta-prod") && all_rows.contains("gws-prod"));
+
+  // By system: one of the two Adas.
+  let one_system = rows_of(&page(&state, "/entities?system=okta-prod").await);
+  assert!(one_system.contains("Ada Lovelace"));
+  assert!(!one_system.contains("gws-prod"));
+
+  // By kind, which is the other way to make the same cut.
+  let by_kind = rows_of(&page(&state, "/entities?kind=idp").await);
+  assert!(by_kind.contains("okta-prod"));
+  assert!(!by_kind.contains("gws-prod"));
+
+  // The connector every seeded system is read through, and one that
+  // nothing was read through.
+  let by_connector = page(&state, "/entities?connector=fixture").await;
+  assert!(by_connector.contains("Ada Lovelace"));
+  let wrong_connector = page(&state, "/entities?connector=okta").await;
+  assert!(!wrong_connector.contains("Ada Lovelace"));
+  assert!(wrong_connector.contains("Nothing matches these filters"));
+
+  // An entity type that exists, and one that does not.
+  let by_type = page(&state, "/entities?entity_type=user").await;
+  assert!(by_type.contains("Ada Lovelace"));
+  let no_type = page(&state, "/entities?entity_type=phone-device").await;
+  assert!(!no_type.contains("Ada Lovelace"));
+
+  // A kind that does not parse is refused, as the violations board
+  // refuses a bad severity. Ignoring it would widen a filter the
+  // operator set, and defaulting it would answer a different question.
+  let bogus = get(&state, "/entities?kind=not-a-kind").await;
+  assert_eq!(bogus.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn the_entity_browser_searches_the_latest_facts_content() {
+  let state = seeded().await;
+
+  let hit = page(&state, "/entities?q=ada").await;
+  assert!(hit.contains("Ada Lovelace"));
+  assert!(!hit.contains("Grace Hopper"), "the search narrows");
+
+  // A value the overlay carries but the display name does not.
+  let by_department = page(&state, "/entities?q=engineering").await;
+  assert!(by_department.contains("Ada Lovelace"));
+
+  let miss = page(&state, "/entities?q=nobodyhasthisstring").await;
+  assert!(!miss.contains("Ada Lovelace"));
+  assert!(miss.contains("Nothing matches these filters"));
+
+  // Punctuation is not an FTS5 syntax error, and an address finds its
+  // account rather than 500-ing.
+  for q in ["ada%40example.com", "%22oops", "a%20AND%20b", "*", "%5E"] {
+    let res = get(&state, &format!("/entities?q={q}")).await;
+    assert_eq!(res.status(), StatusCode::OK, "GET /entities?q={q}");
+  }
+  assert!(
+    page(&state, "/entities?q=ada%40example.com")
+      .await
+      .contains("Ada Lovelace")
+  );
+}
+
+#[tokio::test]
+async fn the_entity_browser_answers_htmx_with_the_table_alone() {
+  // As the other filtered screens: the same URL has to serve the swap
+  // and a fresh browser load of it, or a reload of a filtered view
+  // renders a bare fragment.
+  let state = seeded().await;
+  let swapped = fragment(&state, "/entities?q=ada").await;
+  assert!(swapped.contains("Ada Lovelace"));
+  assert!(
+    !swapped.contains("<nav"),
+    "the fragment must not carry the nav"
+  );
+
+  let whole = page(&state, "/entities?q=ada").await;
+  assert!(whole.contains("<nav"), "a fresh load is the whole screen");
+  assert!(whole.contains("Ada Lovelace"));
+}
+
+#[tokio::test]
+async fn an_entity_with_a_blank_name_still_renders_a_clickable_link() {
+  // End to end, against a fact already in the store carrying
+  // `display_name: ""` — which is what a store written before
+  // normalization dropped blanks holds, and what the view guard exists
+  // for. The row must identify itself and the link must be clickable.
+  let state = seeded().await;
+  let sweep_id = state
+    .db
+    .write(|w| {
+      w.open_sweep(&SweepStart {
+        started_at:        ts(NOW),
+        requested:         vec![SystemId::new("ucm-extensions")],
+        pinned_checks:     vec![],
+        pinned_norm:       vec![],
+        absence_guard_pct: 10,
+      })
+    })
+    .unwrap();
+
+  let mut record = NormalizedRecord::new(
+    "ucm-extensions",
+    overlord_core::SystemKind::Sso,
+    "phone-extension",
+    "1001",
+    EntityStatus::Active,
+  );
+  record.display_name = Some(String::new());
+
+  state
+    .db
+    .write(|w| {
+      w.append_facts(sweep_id, &[NewFact {
+        system:       SystemId::new("ucm-extensions"),
+        entity_type:  EntityType::new("phone-extension"),
+        entity_key:   EntityKey::new("1001"),
+        observed_at:  ts(NOW),
+        raw:          Some(serde_json::json!({ "extension": "1001" })),
+        normalized:   Some(record),
+        norm_version: "grandstream-ucm-extension/1".to_owned(),
+      }])?;
+      w.commit_sweep(sweep_id, SweepStatus::Ok, ts(NOW))
+    })
+    .unwrap();
+
+  let rows = rows_of(&page(&state, "/entities?system=ucm-extensions").await);
+  assert!(
+    rows.contains("ucm-extensions/1001"),
+    "a blank name must fall back to the ref, not render an empty link: {rows}"
+  );
+  assert!(
+    !rows.contains("\"ref\"></a>") && !rows.contains("\"ref\"> </a>"),
+    "an empty anchor is invisible and unclickable: {rows}"
+  );
+
+  // The detail page it links to titles itself by the key for the same
+  // reason, rather than opening with an empty heading.
+  let detail = page(
+    &state,
+    "/entity?ref=ucm-extensions%2Fphone-extension%2F1001",
+  )
+  .await;
+  assert!(detail.contains("1001"));
+  assert!(!detail.contains("<h1></h1>"), "an empty title");
 }

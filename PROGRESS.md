@@ -1347,3 +1347,109 @@ stay complete.
 
 `cargo test --workspace`: 363 passing. `clippy -D warnings` and
 `fmt --check`: clean.
+
+### 2026-09-21 — the entity browser and full-text search
+
+A screen SPEC.md section 5 does not list, added because the identity
+policy made its absence a hole: the Users roster is person-shaped and now
+deliberately excludes the entity types that are not people, so a fleet of
+handsets was collected, evaluated and violation-tracked with nowhere to
+look at it. `/entities` lists entities as entities.
+
+**Facets: connector, system, system kind, entity type, presence.** The
+first three are the ones an operator actually has in mind; entity type is
+what separates two populations read from one appliance. `SYSTEM_FACETS`
+resolves connector and kind separately on purpose — the connector is the
+latest one *recorded*, matching the `connector:` check selector so the
+screen and a check scope never disagree, while the kind comes from the
+entity's own overlay and falls back to the system's last sweep, which is
+what keeps a tombstone classifiable.
+
+A facet that does not parse is **refused**, not ignored and not
+defaulted, which is what the violations board already does with a bad
+severity. `?kind=mdmm` quietly listing the IdP was the first version and
+it is the worst of the three behaviours: it answers a question nobody
+asked.
+
+**Search runs over the latest fact's content** — the normalization
+overlay and the vendor payload behind it — as an FTS5 index maintained by
+trigger. Two decisions are load-bearing.
+
+*Leaf values, not the JSON around them.* `json_tree` keeps the scalars
+and drops the keys, so `grandstream` finds the handsets whose vendor is
+Grandstream rather than every entity that has a `vendor` key.
+
+*`tokenchars '.-:@_'`.* Almost everything searched for here is an
+identifier carrying punctuation — a firmware version, an address, an IP,
+a colon-written MAC. The default tokenizer splits those into fragments,
+and searching `9.9.9.9` matched a handset running `1.0.9.10`, which is
+not a near miss but the wrong answer. Keeping the characters inside
+tokens makes an identifier one token; prefix matching is what still lets
+`ada` find `ada@example.com`. The cost is that `x.com` no longer matches
+`ada@example.com`, which is the right side of the trade. `fts_query` and
+the migration have to spell the same set, so `read::TOKEN_CHARS` is the
+one definition and both cite it.
+
+Operator input is never an FTS5 query: the syntax has its own operators
+and an email address alone has enough punctuation to turn a search into a
+database error. `fts_query` rebuilds the input as quoted prefix terms and
+drops everything else.
+
+**By trigger rather than in `project.rs`**, where every other projection
+is built. `entity` is written from two places — the sweep's upsert and
+replay — and an index one of them forgot would not fail; it would return
+fewer results than the store holds, which is the worst way for a search
+box to be wrong. It also means `rebuild` needs no special case, and the
+migration backfills so search is not empty until the next sweep.
+
+Also a `overlord entities` CLI command with the same facets, and the
+screen in the nav after Identity — the two screens before it are about
+the person/not-a-person distinction, and this is the list that does not
+care.
+
+Tested: each facet alone and two facets narrowing together; search
+reaching the overlay, the raw payload and the entity key; values indexed
+rather than keys; identifiers whole and by prefix; ten kinds of
+punctuation in the box asserted not to error; the index following the
+latest fact rather than the first; tombstones excluded by default and
+findable on request with the kind still resolving; survival of a rebuild;
+and at the route level, the browser listing what the roster excludes, the
+htmx fragment carrying no nav, and a bad facet returning 400.
+
+`cargo test --workspace`: 379 passing. `clippy -D warnings` and
+`fmt --check`: clean.
+
+### 2026-09-21 — a blank display name is not a display name
+
+`subject_label` returned `Some("")` as the label, which rendered
+`<a class="ref" href="..."></a>`: a link with no text, invisible in the
+table and impossible to click. Everything downstream treats "there is a
+display name" as a reason to show it *instead of* the entity key, so a
+blank one removes the only thing identifying the row.
+
+Reachable rather than theoretical. Vendors spell "not filled in" as
+`null` and as `""` interchangeably — Grandstream's own `listAccount`
+example does both — and an unnamed extension or a handset provisioned
+without a label is the ordinary case, not the edge.
+
+Fixed at both ends, because they cover different populations. In
+`normalize`, a blank never becomes a `display_name`, which keeps it out
+of the fact stream going forward; the overlay still records a real name
+untrimmed, since trimming for display is the view's business. In
+`view::named`, a blank is treated as absent at the one point every label
+passes through — which is what covers facts already in the store, and
+any connector whose ruleset maps a blank in future. The CLI has the same
+guard for the same reason.
+
+Also the two detail-page titles, which used `unwrap_or_else` directly
+and would have opened with an empty heading.
+
+Tested at each layer: the overlay dropping blank and whitespace names
+while keeping a padded real one; `subject_label` and `subject` falling
+back to the ref for `""`, whitespace and `None`; and end to end, a fact
+stored with `display_name: ""` rendering a row that identifies itself,
+an anchor that is not empty, and a detail page that is not titled
+nothing.
+
+`cargo test --workspace`: 383 passing. `clippy -D warnings` and
+`fmt --check`: clean.

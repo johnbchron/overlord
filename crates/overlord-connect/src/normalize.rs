@@ -249,6 +249,14 @@ impl Ruleset {
 
     if let Some(rule) = &self.display_name
       && let Value::String(name) = read(&raw, rule, &mut warnings)
+      // A blank name is not a name. Vendors spell "this field is not
+      // filled in" as `null` and as `""` interchangeably — Grandstream's
+      // own `listAccount` example does both — and the difference must
+      // not reach the overlay, because everything downstream treats
+      // "there is a display name" as a reason to show it *instead of*
+      // the key. `Some("")` is how an entity ends up with an empty,
+      // unclickable link where its name belongs.
+      && !name.trim().is_empty()
     {
       record.display_name = Some(name);
     }
@@ -414,6 +422,45 @@ mod tests {
     assert_eq!(r.get("mfa_enrolled"), Value::Bool(true));
     assert_eq!(r.get("last_login_at").type_name(), "timestamp");
     assert_eq!(r.get("aliases").as_list().unwrap().len(), 1);
+  }
+
+  #[test]
+  fn a_blank_display_name_is_absent_rather_than_empty() {
+    // Vendors spell "not filled in" as null and as "" interchangeably,
+    // and the difference must not reach the overlay: everything
+    // downstream reads "there is a display name" as a reason to show it
+    // instead of the key, so `Some("")` is how an entity ends up with
+    // an empty, unclickable link where its name belongs.
+    for name in ["", "   ", "\t"] {
+      let n = ruleset()
+        .apply(
+          &SystemId::new("gws-prod"),
+          &serde_json::json!({
+            "primaryEmail": "ada@example.com",
+            "name": { "fullName": name },
+            "suspended": false,
+          }),
+        )
+        .unwrap();
+      assert_eq!(
+        n.record.display_name, None,
+        "{name:?} should not become a display name"
+      );
+    }
+
+    // A real name is untouched, padding and all — trimming for display
+    // is the view's business, and the overlay records what was read.
+    let n = ruleset()
+      .apply(
+        &SystemId::new("gws-prod"),
+        &serde_json::json!({
+          "primaryEmail": "ada@example.com",
+          "name": { "fullName": " Ada Lovelace " },
+          "suspended": false,
+        }),
+      )
+      .unwrap();
+    assert_eq!(n.record.display_name.as_deref(), Some(" Ada Lovelace "));
   }
 
   #[test]

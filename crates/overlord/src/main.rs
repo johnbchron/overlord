@@ -17,11 +17,11 @@ use overlord_connector_grandstream_ucm::GrandstreamUcmConnector;
 use overlord_connector_gworkspace::GoogleWorkspaceConnector;
 use overlord_connector_unifi_access::UnifiAccessConnector;
 use overlord_core::{
-  Actor, CheckDraft, CheckId, CommandKind, EntityRef, NewCommand, PersonUid,
-  SubjectRef, SuppressReason, SystemId, Timestamp, ViolationState,
+  Actor, CheckDraft, CheckId, CommandKind, EntityRef, EntityType, NewCommand,
+  PersonUid, SubjectRef, SuppressReason, SystemId, Timestamp, ViolationState,
 };
 use overlord_engine::{SweepPlan, checks, identity, run_sweep};
-use overlord_store::Db;
+use overlord_store::{Db, EntityFilter};
 use overlord_web::{
   AppState, auth::AuthMode, oidc::Oidc, sweeprun::SweepRunner,
 };
@@ -75,6 +75,37 @@ enum Command {
   Users {
     #[arg(long, default_value = "20")]
     limit: usize,
+  },
+
+  /// List collected entities, narrowed by where they came from.
+  ///
+  /// The Users view is person-shaped and leaves out the entity types
+  /// the identity policy says are not people; this one lists everything.
+  Entities {
+    /// Full-text search over the latest fact's content — the
+    /// normalization overlay and the vendor payload behind it.
+    #[arg(long, short = 'q')]
+    query:       Option<String>,
+    /// Only entities read through this connector.
+    #[arg(long)]
+    connector:   Option<String>,
+    /// Only entities in this system.
+    #[arg(long)]
+    system:      Option<String>,
+    /// Only systems of this kind: idp, workspace, sso, mdm.
+    #[arg(long)]
+    kind:        Option<String>,
+    /// Only entities of this type, e.g. `user` or `phone-device`.
+    #[arg(long = "type")]
+    entity_type: Option<String>,
+    /// Include entities absent from their system's latest snapshot.
+    #[arg(long)]
+    all:         bool,
+    /// Only those absent, which is the list of what has gone away.
+    #[arg(long, conflicts_with = "all")]
+    absent:      bool,
+    #[arg(long, default_value = "100")]
+    limit:       usize,
   },
 
   /// Record that a violation has been seen.
@@ -234,6 +265,47 @@ async fn main() -> Result<()> {
       };
       let rows = db.read(|r| r.violations(states, limit))?;
       render::violations(&rows);
+    }
+
+    Command::Entities {
+      query,
+      connector,
+      system,
+      kind,
+      entity_type,
+      all,
+      absent,
+      limit,
+    } => {
+      let filter = EntityFilter {
+        systems: system.into_iter().map(SystemId::new).collect(),
+        connectors: connector.into_iter().collect(),
+        // A kind that does not parse is refused rather than ignored:
+        // silently listing every system because a flag was misspelled
+        // is the wrong answer to `--kind mdmm`.
+        kinds: match kind {
+          Some(k) => vec![k.parse().with_context(|| {
+            format!("--kind {k}: expected idp, workspace, sso or mdm")
+          })?],
+          None => Vec::new(),
+        },
+        entity_types: entity_type.into_iter().map(EntityType::new).collect(),
+        present: if absent {
+          Some(false)
+        } else if all {
+          None
+        } else {
+          Some(true)
+        },
+        query,
+        // One more than asked for, so a full page is distinguishable
+        // from a truncated one.
+        limit: limit + 1,
+      };
+      let mut rows = db.read(|r| r.entities(&filter))?;
+      let truncated = rows.len() > limit;
+      rows.truncate(limit);
+      render::entities(&rows, truncated);
     }
 
     Command::Users { limit } => {

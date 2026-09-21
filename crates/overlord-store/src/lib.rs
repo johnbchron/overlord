@@ -25,7 +25,8 @@ pub use detail::{
 pub use error::{Result, StoreError};
 pub use identity::Suggestion;
 pub use read::{
-  Counts, EntityState, ScoreRow, SubjectFilter, ViolationFilter, ViolationRow,
+  Counts, EntityFilter, EntityRow, EntityState, ScoreRow, SubjectFilter,
+  TOKEN_CHARS, ViolationFilter, ViolationRow, fts_query,
 };
 pub use streams::{
   FactRow, NewFact, SweepStart, SweepStatus, SweepSummary, SystemOutcome,

@@ -16,6 +16,7 @@ pub enum Section {
   Violations,
   Rules,
   Users,
+  Entities,
   Identity,
   Sweeps,
   Systems,
@@ -26,7 +27,7 @@ pub enum Section {
 }
 
 impl Section {
-  const NAV: [(Self, &'static str, &'static str); 7] = [
+  const NAV: [(Self, &'static str, &'static str); 8] = [
     (Self::Violations, "/", "Violations"),
     (Self::Rules, "/rules", "Rules"),
     (Self::Users, "/users", "Users"),
@@ -34,6 +35,10 @@ impl Section {
     // turns a list of accounts into a list of people, and it is where an
     // operator lands after seeing an `ambiguous` flag on the board.
     (Self::Identity, "/identity", "Identity"),
+    // After Identity rather than beside Users: this is the list that
+    // does not care whether something is a person, which is the
+    // distinction the two screens before it are about.
+    (Self::Entities, "/entities", "Entities"),
     (Self::Sweeps, "/sweeps", "Sweeps"),
     (Self::Systems, "/systems", "Systems"),
     (Self::Settings, "/settings", "Settings"),

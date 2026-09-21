@@ -4,7 +4,7 @@
 use overlord_core::{
   CheckDraft, CheckId, CheckRecord, EntityRef, EntityStatus, EntityType,
   NormalizedRecord, PersonUid, Revision, Severity, SubjectKind, SubjectRef,
-  SweepId, SystemId, Timestamp, ViolationState,
+  SweepId, SystemId, SystemKind, Timestamp, ViolationState,
 };
 use rusqlite::{OptionalExtension, params};
 
@@ -1196,4 +1196,309 @@ impl Reader<'_> {
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
   }
+}
+
+/// One entity as the browse screen shows it.
+#[derive(Debug, Clone)]
+pub struct EntityRow {
+  pub entity:          EntityRef,
+  pub display_name:    Option<String>,
+  /// `None` for an absent entity: a tombstone carries no overlay, so
+  /// there is no status to report rather than a status of "gone".
+  pub status:          Option<EntityStatus>,
+  /// From the overlay, falling back to what the system was last swept
+  /// as — which is what keeps an absent entity classifiable.
+  pub system_kind:     Option<SystemKind>,
+  /// The connector the system was last read through. `None` for a
+  /// system swept only before connectors were recorded.
+  pub connector:       Option<String>,
+  pub present:         bool,
+  pub last_seen_sweep: SweepId,
+  /// Open and acknowledged violations against this entity. Person-scoped
+  /// violations are not counted here: they are not about the entity.
+  pub violations:      i64,
+}
+
+/// Which entities to list.
+///
+/// Every facet is a set, and an empty set means "no restriction" rather
+/// than "match nothing" — the same convention [`ViolationFilter`] uses,
+/// so a caller that builds one from a form does not have to special-case
+/// the unfiltered screen.
+#[derive(Debug, Clone)]
+pub struct EntityFilter {
+  pub systems:      Vec<SystemId>,
+  pub connectors:   Vec<String>,
+  pub kinds:        Vec<SystemKind>,
+  pub entity_types: Vec<EntityType>,
+  /// `Some(true)` for entities the last sweep saw, `Some(false)` for
+  /// tombstoned ones, `None` for both.
+  pub present:      Option<bool>,
+  /// Full-text search over the latest fact's content.
+  pub query:        Option<String>,
+  pub limit:        usize,
+}
+
+impl Default for EntityFilter {
+  /// What the browse screen opens on: everything still present.
+  fn default() -> Self {
+    Self {
+      systems:      Vec::new(),
+      connectors:   Vec::new(),
+      kinds:        Vec::new(),
+      entity_types: Vec::new(),
+      present:      Some(true),
+      query:        None,
+      limit:        500,
+    }
+  }
+}
+
+/// The latest connector and system kind for each system.
+///
+/// Connector and kind are resolved separately on purpose. The connector
+/// is the latest one that was *recorded* — matching the `connector:`
+/// check selector, so the browse screen and a check scope never disagree
+/// about which connector a system belongs to — while the kind is simply
+/// the latest sweep's, which every row carries.
+const SYSTEM_FACETS: &str = "
+  sys AS (
+    SELECT DISTINCT
+      s.system AS system,
+      (SELECT k.system_kind FROM sweep_system k
+        WHERE k.system = s.system
+        ORDER BY k.sweep_id DESC LIMIT 1) AS system_kind,
+      (SELECT c.connector FROM sweep_system c
+        WHERE c.system = s.system AND c.connector IS NOT NULL
+        ORDER BY c.sweep_id DESC LIMIT 1) AS connector
+    FROM sweep_system s
+  )";
+
+impl Reader<'_> {
+  /// List entities, narrowed by the facets an operator chose.
+  ///
+  /// # Errors
+  /// On a SQLite failure.
+  pub fn entities(&self, filter: &EntityFilter) -> Result<Vec<EntityRow>> {
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+    let mut clauses: Vec<String> = Vec::new();
+
+    let bind =
+      |params: &mut Vec<Box<dyn rusqlite::ToSql>>, v: String| -> String {
+        params.push(Box::new(v));
+        format!("?{}", params.len())
+      };
+    let list = |params: &mut Vec<Box<dyn rusqlite::ToSql>>,
+                values: Vec<String>|
+     -> String {
+      values
+        .into_iter()
+        .map(|v| bind(params, v))
+        .collect::<Vec<_>>()
+        .join(", ")
+    };
+
+    if !filter.systems.is_empty() {
+      let s = list(
+        &mut params,
+        filter.systems.iter().map(ToString::to_string).collect(),
+      );
+      clauses.push(format!("e.system IN ({s})"));
+    }
+    if !filter.entity_types.is_empty() {
+      let t = list(
+        &mut params,
+        filter
+          .entity_types
+          .iter()
+          .map(ToString::to_string)
+          .collect(),
+      );
+      clauses.push(format!("e.entity_type IN ({t})"));
+    }
+    if !filter.connectors.is_empty() {
+      let c = list(&mut params, filter.connectors.clone());
+      clauses.push(format!("sys.connector IN ({c})"));
+    }
+    if !filter.kinds.is_empty() {
+      let k = list(
+        &mut params,
+        filter.kinds.iter().map(|k| k.as_str().to_owned()).collect(),
+      );
+      // The overlay's kind is the entity's own; `sys.system_kind` is
+      // what keeps a tombstone — which has no overlay — classifiable.
+      clauses.push(format!(
+        "coalesce(json_extract(e.normalized, '$.system_kind'), \
+         sys.system_kind) IN ({k})"
+      ));
+    }
+    if let Some(present) = filter.present {
+      clauses.push(format!("e.present = {}", i64::from(present)));
+    }
+
+    if let Some(text) = &filter.query
+      && let Some(match_query) = fts_query(text)
+    {
+      let q = bind(&mut params, match_query);
+      clauses.push(format!(
+        "(e.system, e.entity_type, e.entity_key) IN (
+           SELECT system, entity_type, entity_key
+             FROM entity_search WHERE entity_search MATCH {q})"
+      ));
+    }
+
+    let where_clause = if clauses.is_empty() {
+      String::new()
+    } else {
+      format!("WHERE {}", clauses.join(" AND "))
+    };
+    let limit = bind(&mut params, filter.limit.to_string());
+
+    let sql = format!(
+      "WITH {SYSTEM_FACETS},
+       open_counts AS (
+         SELECT subject_ref, count(*) AS n FROM violation
+          WHERE state IN ('open', 'acknowledged')
+          GROUP BY subject_ref
+       )
+       SELECT e.system, e.entity_type, e.entity_key, e.present,
+              json_extract(e.normalized, '$.display_name'),
+              json_extract(e.normalized, '$.status'),
+              coalesce(json_extract(e.normalized, '$.system_kind'),
+                       sys.system_kind),
+              sys.connector,
+              e.last_seen_sweep,
+              coalesce(v.n, 0)
+         FROM entity e
+         LEFT JOIN sys ON sys.system = e.system
+         LEFT JOIN open_counts v
+           ON v.subject_ref =
+              'entity/' || e.system || '/' || e.entity_type || '/'
+                || e.entity_key
+       {where_clause}
+       ORDER BY coalesce(v.n, 0) DESC, e.system, e.entity_type,
+                lower(coalesce(json_extract(e.normalized, '$.display_name'),
+                               e.entity_key)),
+                e.entity_key
+       LIMIT {limit}"
+    );
+
+    let refs: Vec<&dyn rusqlite::ToSql> =
+      params.iter().map(AsRef::as_ref).collect();
+    let mut stmt = self.conn().prepare(&sql)?;
+    let rows = stmt.query_map(refs.as_slice(), |r| {
+      Ok((
+        EntityRef::new(
+          r.get::<_, String>(0)?,
+          r.get::<_, String>(1)?,
+          r.get::<_, String>(2)?,
+        ),
+        r.get::<_, i64>(3)?,
+        r.get::<_, Option<String>>(4)?,
+        r.get::<_, Option<String>>(5)?,
+        r.get::<_, Option<String>>(6)?,
+        r.get::<_, Option<String>>(7)?,
+        r.get::<_, i64>(8)?,
+        r.get::<_, i64>(9)?,
+      ))
+    })?;
+
+    let mut out = Vec::new();
+    for row in rows {
+      let (entity, present, name, status, kind, connector, seen, violations) =
+        row?;
+      out.push(EntityRow {
+        entity,
+        display_name: name,
+        // An unparseable status is reported as absent rather than
+        // failing the listing: one odd overlay must not blank a screen.
+        status: status.and_then(|s| s.parse().ok()),
+        system_kind: kind.and_then(|k| k.parse().ok()),
+        connector,
+        present: present == 1,
+        last_seen_sweep: SweepId(seen),
+        violations,
+      });
+    }
+    Ok(out)
+  }
+
+  /// The entity types present in the store, for a filter's options.
+  ///
+  /// # Errors
+  /// On a SQLite failure.
+  pub fn entity_types(&self) -> Result<Vec<EntityType>> {
+    let mut stmt = self.conn().prepare(
+      "SELECT DISTINCT entity_type FROM entity ORDER BY entity_type",
+    )?;
+    let rows =
+      stmt.query_map([], |r| r.get::<_, String>(0).map(EntityType::new))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+  }
+
+  /// The connectors systems have been read through, for a filter's
+  /// options.
+  ///
+  /// # Errors
+  /// On a SQLite failure.
+  pub fn known_connectors(&self) -> Result<Vec<String>> {
+    let mut stmt = self.conn().prepare(
+      "SELECT DISTINCT connector FROM sweep_system
+        WHERE connector IS NOT NULL ORDER BY connector",
+    )?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+  }
+}
+
+/// The punctuation that stays *inside* a token rather than splitting
+/// one, matching the `tokenchars` `entity_search` was created with.
+///
+/// Firmware versions, addresses, IPs, colon-written MACs and hyphenated
+/// entity types are identifiers an operator searches for whole. Changing
+/// this means rebuilding the index, so the two spellings — here and in
+/// the migration — must not drift.
+pub const TOKEN_CHARS: &str = ".-:@_";
+
+/// Turn what an operator typed into an FTS5 MATCH expression.
+///
+/// Operator input is never an FTS5 query. The syntax has its own
+/// operators (`AND`, `NOT`, `*`, `:`, `^`, quotes, parentheses), and a
+/// stray one is not a narrower search — it is a syntax error that
+/// returns a database error instead of results. An email address alone
+/// contains enough punctuation to fail.
+///
+/// So the input is split the way the *index's* tokenizer would split
+/// it, each term becomes one quoted prefix term, and anything with no
+/// alphanumeric in it is dropped. Terms are ANDed: every one has to
+/// appear on an entity for it to match.
+///
+/// The split has to agree with the `tokenchars` the index was built
+/// with, or the two disagree in the worst way: the index holds
+/// `1.0.11.76` as one token while a search for it asks for four, and
+/// matches every device sharing any digit group. [`TOKEN_CHARS`] is the
+/// definition both sides use.
+///
+/// Prefix matching keeps identifiers usable from the other direction —
+/// `ada` is a prefix of the token `ada@example.com` — so the box still
+/// feels live as it is typed.
+///
+/// Returns `None` when nothing searchable is left, which the caller
+/// reads as "no text filter" rather than "match nothing".
+#[must_use]
+pub fn fts_query(text: &str) -> Option<String> {
+  let terms: Vec<String> = text
+    .split(|c: char| !c.is_alphanumeric() && !TOKEN_CHARS.contains(c))
+    .map(|t| t.trim_matches(|c| TOKEN_CHARS.contains(c)))
+    .filter(|t| t.chars().any(char::is_alphanumeric))
+    // A `"` cannot reach here: it is neither alphanumeric nor a token
+    // character, so it is a separator. The escape is written anyway —
+    // this string is concatenated into a query, and that is not a
+    // property to leave resting on the classification above.
+    .map(|t| format!("\"{}\"*", t.to_lowercase().replace('"', "\"\"")))
+    .collect();
+  if terms.is_empty() {
+    return None;
+  }
+  Some(terms.join(" "))
 }

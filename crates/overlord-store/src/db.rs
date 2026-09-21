@@ -17,6 +17,7 @@ fn migrations() -> Migrations<'static> {
     M::up(include_str!("sql/0001_initial.sql")),
     M::up(include_str!("sql/0002_system_connector.sql")),
     M::up(include_str!("sql/0003_identity_policy.sql")),
+    M::up(include_str!("sql/0004_entity_search.sql")),
   ])
 }
 

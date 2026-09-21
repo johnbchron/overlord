@@ -88,6 +88,7 @@ pub fn router(state: AppState) -> Router {
     .route("/users", get(pages::users::list))
     // As `/violations/rows` above: a URL earlier versions pushed.
     .route("/users/results", get(pages::users::list))
+    .route("/entities", get(pages::entities::list))
     .route("/person", get(pages::subject::person))
     .route("/entity", get(pages::subject::entity))
     // --- identity (SPEC.md section 12) ---------------------------------

@@ -6,6 +6,7 @@
 //! fragment is always the smaller of the two: a page calls into it, so
 //! the two cannot drift.
 
+pub mod entities;
 pub mod identity;
 pub mod rules;
 pub mod settings;

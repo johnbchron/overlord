@@ -79,9 +79,11 @@ pub async fn person(
     entity_violations.extend(rows);
   }
 
-  let title = detail.display_name.clone().unwrap_or_else(|| {
-    view::subject_label(&SubjectRef::Person(detail.person_uid.clone()), None)
-  });
+  let title = view::named(detail.display_name.as_deref())
+    .map(ToOwned::to_owned)
+    .unwrap_or_else(|| {
+      view::subject_label(&SubjectRef::Person(detail.person_uid.clone()), None)
+    });
   let back = format!(
     "/person?uid={}",
     view::urlencode(detail.person_uid.as_str())
@@ -298,8 +300,8 @@ pub async fn entity(
   let title = detail
     .normalized
     .as_ref()
-    .and_then(|n| n.display_name.clone())
-    .unwrap_or_else(|| entity.entity_key.to_string());
+    .and_then(|n| view::named(n.display_name.as_deref()))
+    .map_or_else(|| entity.entity_key.to_string(), ToOwned::to_owned);
   let back = format!("/entity?ref={}", view::urlencode(&entity.to_string()));
 
   let content = html! {

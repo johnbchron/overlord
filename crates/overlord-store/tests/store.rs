@@ -867,3 +867,391 @@ fn the_policy_is_read_back_as_the_set_it_was_written_with() {
     [EntityType::new("phone")].into_iter().collect()
   );
 }
+
+// --- browsing and searching entities ----------------------------------
+
+use overlord_store::{EntityFilter, fts_query};
+
+fn device_fact(key: &str, model: &str, firmware: &str) -> NewFact {
+  let mut n = NormalizedRecord::new(
+    "ucm-devices",
+    SystemKind::Mdm,
+    "phone-device",
+    key,
+    EntityStatus::Active,
+  );
+  n.insert("model", Value::String(model.to_owned()));
+  n.insert("firmware_version", Value::String(firmware.to_owned()));
+  n.insert("vendor", Value::String("Grandstream".to_owned()));
+  NewFact {
+    system:       SystemId::new("ucm-devices"),
+    entity_type:  EntityType::new("phone-device"),
+    entity_key:   EntityKey::new(key),
+    observed_at:  ts(T0),
+    raw:          Some(serde_json::json!({
+      "device": { "mac": key, "notes": "reception desk" }
+    })),
+    normalized:   Some(n),
+    norm_version: "grandstream-ucm-device/1".to_owned(),
+  }
+}
+
+/// The shared `outcome` helper fixes one system kind; the browse tests
+/// need two, because telling them apart is the point of the facet.
+fn outcome_of(
+  system: &str,
+  connector: &str,
+  kind: SystemKind,
+) -> SystemOutcome {
+  SystemOutcome {
+    system_kind: kind,
+    ..outcome(system, connector)
+  }
+}
+
+/// A store holding two systems read through two connectors.
+fn browsable() -> Db {
+  let db = db();
+  let s = sweep(&db, T0);
+  db.write(|w| {
+    w.append_facts(s, &[
+      user_fact("ada@x.com", EntityStatus::Active, true),
+      user_fact("grace@x.com", EntityStatus::Suspended, false),
+      device_fact("000b82aabbcc", "GRP2615", "1.0.11.76"),
+      device_fact("000b82aabbcd", "GRP2612", "1.0.9.10"),
+    ])
+  })
+  .unwrap();
+  db.write(|w| {
+    w.record_system(
+      s,
+      &outcome_of("gws-prod", "google-workspace", SystemKind::Workspace),
+    )?;
+    w.record_system(
+      s,
+      &outcome_of("ucm-devices", "grandstream-ucm", SystemKind::Mdm),
+    )
+  })
+  .unwrap();
+  db.write(|w| w.commit_sweep(s, SweepStatus::Ok, ts(T0)))
+    .unwrap();
+  db
+}
+
+fn keys(rows: &[overlord_store::EntityRow]) -> Vec<String> {
+  let mut v: Vec<String> = rows
+    .iter()
+    .map(|r| r.entity.entity_key.to_string())
+    .collect();
+  v.sort();
+  v
+}
+
+#[test]
+fn every_entity_is_listed_whatever_its_type() {
+  // The Users roster is person-shaped and excludes non-person types by
+  // policy; this is the screen that does not.
+  let db = browsable();
+  let rows = db.read(|r| r.entities(&EntityFilter::default())).unwrap();
+  assert_eq!(rows.len(), 4);
+}
+
+#[test]
+fn entities_filter_by_system_connector_kind_and_type() {
+  let db = browsable();
+
+  let by_system = db
+    .read(|r| {
+      r.entities(&EntityFilter {
+        systems: vec![SystemId::new("ucm-devices")],
+        ..Default::default()
+      })
+    })
+    .unwrap();
+  assert_eq!(keys(&by_system), ["000b82aabbcc", "000b82aabbcd"]);
+
+  let by_connector = db
+    .read(|r| {
+      r.entities(&EntityFilter {
+        connectors: vec!["google-workspace".to_owned()],
+        ..Default::default()
+      })
+    })
+    .unwrap();
+  assert_eq!(keys(&by_connector), ["ada@x.com", "grace@x.com"]);
+  assert_eq!(
+    by_connector[0].connector.as_deref(),
+    Some("google-workspace")
+  );
+
+  let by_kind = db
+    .read(|r| {
+      r.entities(&EntityFilter {
+        kinds: vec![SystemKind::Mdm],
+        ..Default::default()
+      })
+    })
+    .unwrap();
+  assert_eq!(keys(&by_kind), ["000b82aabbcc", "000b82aabbcd"]);
+  assert_eq!(by_kind[0].system_kind, Some(SystemKind::Mdm));
+
+  let by_type = db
+    .read(|r| {
+      r.entities(&EntityFilter {
+        entity_types: vec![EntityType::new("user")],
+        ..Default::default()
+      })
+    })
+    .unwrap();
+  assert_eq!(keys(&by_type), ["ada@x.com", "grace@x.com"]);
+}
+
+#[test]
+fn the_facets_narrow_together_rather_than_widening() {
+  // Two facets that disagree return nothing, which is what an operator
+  // reading them as "and" expects.
+  let db = browsable();
+  let rows = db
+    .read(|r| {
+      r.entities(&EntityFilter {
+        connectors: vec!["grandstream-ucm".to_owned()],
+        entity_types: vec![EntityType::new("user")],
+        ..Default::default()
+      })
+    })
+    .unwrap();
+  assert!(rows.is_empty());
+}
+
+#[test]
+fn search_reaches_the_normalized_overlay_and_the_raw_payload() {
+  let db = browsable();
+  let find = |q: &str| {
+    db.read(|r| {
+      r.entities(&EntityFilter {
+        query: Some(q.to_owned()),
+        ..Default::default()
+      })
+    })
+    .map(|rows| keys(&rows))
+    .unwrap()
+  };
+
+  // A normalized field.
+  assert_eq!(find("GRP2615"), ["000b82aabbcc"]);
+  // A value only the vendor payload carries.
+  assert_eq!(find("reception"), ["000b82aabbcc", "000b82aabbcd"]);
+  // The entity key itself, including a partial one.
+  assert_eq!(find("000b82aabbcd"), ["000b82aabbcd"]);
+  // Case-insensitive, and a prefix is enough.
+  assert_eq!(find("grandstr"), ["000b82aabbcc", "000b82aabbcd"]);
+  assert_eq!(find("ADA"), ["ada@x.com"]);
+  // Terms are ANDed: both must appear on the same entity.
+  assert!(find("GRP2615 GRP2612").is_empty());
+  assert_eq!(find("grandstream GRP2612"), ["000b82aabbcd"]);
+}
+
+#[test]
+fn search_indexes_values_rather_than_the_json_around_them() {
+  // Searching `vendor` should not return every entity that has a
+  // `vendor` key. Keys are structure; an operator is looking for
+  // content.
+  let db = browsable();
+  let rows = db
+    .read(|r| {
+      r.entities(&EntityFilter {
+        query: Some("firmware_version".to_owned()),
+        ..Default::default()
+      })
+    })
+    .unwrap();
+  assert!(rows.is_empty(), "{:?}", keys(&rows));
+}
+
+#[test]
+fn punctuation_in_the_search_box_is_not_a_database_error() {
+  // FTS5 syntax has its own operators, and an email address alone has
+  // enough punctuation to fail the query outright. Every one of these
+  // must return results or nothing — never an error.
+  let db = browsable();
+  for q in [
+    "ada@x.com",
+    "\"unterminated",
+    "a AND b",
+    "NOT ada",
+    "*",
+    "^ada",
+    "()",
+    "col:umn",
+    "   ",
+    "",
+  ] {
+    db.read(|r| {
+      r.entities(&EntityFilter {
+        query: Some(q.to_owned()),
+        ..Default::default()
+      })
+    })
+    .unwrap_or_else(|e| panic!("{q:?} failed: {e}"));
+  }
+  // And an address does find its account rather than being dropped.
+  let rows = db
+    .read(|r| {
+      r.entities(&EntityFilter {
+        query: Some("ada@x.com".to_owned()),
+        ..Default::default()
+      })
+    })
+    .unwrap();
+  assert_eq!(keys(&rows), ["ada@x.com"]);
+}
+
+#[test]
+fn an_empty_search_is_no_filter_rather_than_no_results() {
+  assert!(fts_query("").is_none());
+  assert!(fts_query("   ").is_none());
+  assert!(fts_query("!!! ---").is_none());
+  assert_eq!(fts_query("Ada"), Some("\"ada\"*".to_owned()));
+  // An identifier stays one term, because the index holds it as one
+  // token. Splitting here would match every entity sharing any fragment.
+  assert_eq!(fts_query("ada@x.com"), Some("\"ada@x.com\"*".to_owned()));
+  assert_eq!(fts_query("1.0.11.76"), Some("\"1.0.11.76\"*".to_owned()));
+  // Punctuation around a term is trimmed rather than kept as part of it.
+  assert_eq!(fts_query("  (ada)  "), Some("\"ada\"*".to_owned()));
+  assert_eq!(
+    fts_query("GRP2615 grandstream"),
+    Some("\"grp2615\"* \"grandstream\"*".to_owned())
+  );
+}
+
+#[test]
+fn identifiers_are_searchable_whole_and_by_prefix() {
+  let db = browsable();
+  let find = |q: &str| {
+    db.read(|r| {
+      r.entities(&EntityFilter {
+        query: Some(q.to_owned()),
+        ..Default::default()
+      })
+    })
+    .map(|rows| keys(&rows))
+    .unwrap()
+  };
+
+  // Whole: the exact firmware, and only the handset running it.
+  assert_eq!(find("1.0.11.76"), ["000b82aabbcc"]);
+  // By prefix, which is how the box behaves as it is typed.
+  assert_eq!(find("1.0.11"), ["000b82aabbcc"]);
+  assert_eq!(find("ada"), ["ada@x.com"]);
+  assert_eq!(find("ada@x"), ["ada@x.com"]);
+  // A fragment that is not a prefix does not match, which is the price
+  // of keeping identifiers whole and is the right side of the trade.
+  assert!(find("x.com").is_empty());
+}
+
+#[test]
+fn the_index_follows_the_latest_fact_rather_than_the_first() {
+  // "Current state" is the latest fact (SPEC.md section 6.1). A search
+  // index that kept the first would answer questions about a firmware
+  // version the handset no longer runs.
+  let db = browsable();
+  let s2 = sweep(&db, T1);
+  db.write(|w| {
+    w.append_facts(s2, &[device_fact("000b82aabbcc", "GRP2615", "9.9.9.9")])
+  })
+  .unwrap();
+  db.write(|w| w.commit_sweep(s2, SweepStatus::Ok, ts(T1)))
+    .unwrap();
+
+  let find = |q: &str| {
+    db.read(|r| {
+      r.entities(&EntityFilter {
+        query: Some(q.to_owned()),
+        ..Default::default()
+      })
+    })
+    .map(|rows| keys(&rows))
+    .unwrap()
+  };
+  assert_eq!(find("9.9.9.9"), ["000b82aabbcc"]);
+  assert!(find("1.0.11.76").is_empty(), "the superseded value lingers");
+  // And the other handset, on 1.0.9.10, is not dragged in by sharing a
+  // digit group with 9.9.9.9 — a version is one token, not four.
+  assert_eq!(find("1.0.9.10"), ["000b82aabbcd"]);
+}
+
+#[test]
+fn an_absent_entity_is_excluded_by_default_and_findable_on_request() {
+  let db = browsable();
+  let s2 = sweep(&db, T1);
+  db.write(|w| {
+    w.append_facts(s2, &[NewFact {
+      system:       SystemId::new("ucm-devices"),
+      entity_type:  EntityType::new("phone-device"),
+      entity_key:   EntityKey::new("000b82aabbcd"),
+      observed_at:  ts(T1),
+      raw:          None,
+      normalized:   None,
+      norm_version: "grandstream-ucm-device/1".to_owned(),
+    }])
+  })
+  .unwrap();
+  db.write(|w| w.commit_sweep(s2, SweepStatus::Ok, ts(T1)))
+    .unwrap();
+
+  let present = db.read(|r| r.entities(&EntityFilter::default())).unwrap();
+  assert!(!keys(&present).contains(&"000b82aabbcd".to_owned()));
+
+  let gone = db
+    .read(|r| {
+      r.entities(&EntityFilter {
+        present: Some(false),
+        ..Default::default()
+      })
+    })
+    .unwrap();
+  assert_eq!(keys(&gone), ["000b82aabbcd"]);
+  // A tombstone carries no overlay, so there is no status to report —
+  // and the kind still resolves, from the system's last sweep.
+  assert_eq!(gone[0].status, None);
+  assert_eq!(gone[0].system_kind, Some(SystemKind::Mdm));
+  assert!(!gone[0].present);
+}
+
+#[test]
+fn the_filter_options_come_from_what_the_store_actually_holds() {
+  let db = browsable();
+  assert_eq!(db.read(|r| r.entity_types()).unwrap(), [
+    EntityType::new("phone-device"),
+    EntityType::new("user")
+  ]);
+  assert_eq!(db.read(|r| r.known_connectors()).unwrap(), [
+    "google-workspace",
+    "grandstream-ucm"
+  ]);
+}
+
+#[test]
+fn a_rebuild_leaves_the_search_index_intact() {
+  // The index is maintained by trigger precisely so that replay needs
+  // no special case. If that ever stops being true, search silently
+  // returns less than the store holds.
+  let db = browsable();
+  db.rebuild_projections().unwrap();
+
+  let rows = db
+    .read(|r| {
+      r.entities(&EntityFilter {
+        query: Some("grandstream".to_owned()),
+        ..Default::default()
+      })
+    })
+    .unwrap();
+  assert_eq!(keys(&rows), ["000b82aabbcc", "000b82aabbcd"]);
+  assert_eq!(
+    db.read(|r| r.entities(&EntityFilter::default()))
+      .unwrap()
+      .len(),
+    4
+  );
+}
