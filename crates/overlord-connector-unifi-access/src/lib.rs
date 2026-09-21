@@ -15,7 +15,35 @@
 //! - **doors** — so a policy's resources can be named rather than left as
 //!   opaque ids;
 //! - **user groups and their members** — inverted into per-account membership,
-//!   so `count(groups where …)` is a question the overlay can answer.
+//!   so `count(groups where …)` is a question the overlay can answer;
+//! - **the door-opening log** over a bounded window, reduced to the one date an
+//!   overlay asks for: when each account last opened a door.
+//!
+//! # Last unlock, and why it is not just a date
+//!
+//! A badge that still opens the building is the access equivalent of a
+//! login, so `last_unlock_at` is what makes a dormancy check possible
+//! on a console — `is_admin and last_login_at < days_ago(90)` has no
+//! meaning here, but "has not opened a door in 90 days" does.
+//!
+//! The trap is that a null date has two meanings, and they are
+//! opposites. "This account opened no door in the window" is a finding;
+//! "the log was not read" is an absence of evidence, and a dormancy
+//! check that could not tell them apart would open a violation against
+//! every account in the console the first time the log endpoint
+//! returned a 500. So the envelope always carries
+//! `unlock_activity_known`, and a check that cares writes
+//! `unlock_activity_known and (last_unlock_at is null or last_unlock_at
+//! < days_ago(90))`. `unlock_window_days` says how far back the null
+//! reaches, because "never" and "not since Tuesday" are different
+//! claims.
+//!
+//! For the same reason the log is all-or-nothing: a read that stopped
+//! halfway withholds the whole view rather than reporting the accounts
+//! it happened to reach. A partial log dates the openings it read, but
+//! it cannot distinguish an account that opened no door from one whose
+//! openings were in the pages that never arrived — and that difference
+//! is the entire content of the field.
 //!
 //! # Credentials and the seam
 //!
@@ -43,7 +71,15 @@
 //!   "user":   { "...": "the developer-API user resource, credentials removed" },
 //!   "has_pin": false,
 //!   "doors":  [ { "id": "…", "name": "Front Door", "type": "door" } ],
-//!   "groups": [ { "id": "…", "name": "Engineering" } ]
+//!   "groups": [ { "id": "…", "name": "Engineering" } ],
+//!   "unlock_activity_known": true,
+//!   "unlock_window_days": 90,
+//!   "last_unlock": {
+//!     "at":   "2026-01-09T08:14:02Z",
+//!     "door": { "id": "…", "name": "Front Door" },
+//!     "via":  "NFC",
+//!     "result": "ACCESS_GRANTED"
+//!   }
 //! }
 //! ```
 //!
@@ -58,6 +94,11 @@
 //! snapshot is `Partial` when any account is in that state. A door list
 //! that failed does not make `doors` absent — entitlement is still
 //! known from the policy resources, and only the names are lost.
+//!
+//! `last_unlock` follows it too, one step further: it is absent both
+//! when the log was not read and when it was read and this account
+//! opened nothing, and `unlock_activity_known` is the boolean that
+//! separates the two.
 //!
 //! # TLS
 //!
@@ -89,12 +130,20 @@ use overlord_connect::{
   Allow, Connector, ConnectorError, Observation, ObserveCtx, RestrictedHttp,
   Ruleset, Snapshot,
 };
-use overlord_core::{Completeness, SystemKind};
+use overlord_core::{Completeness, SystemKind, Timestamp};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tracing::{info, warn};
 
-use crate::api::{DEFAULT_BASE, DOORS_PATH, USER_GROUPS_PATH, USERS_PATH};
+use crate::api::{
+  DEFAULT_BASE, DOORS_PATH, SYSTEM_LOGS_PATH, USER_GROUPS_PATH, USERS_PATH,
+};
+
+/// How far back the door-opening log is read when the operator names no
+/// window. A quarter is the horizon the dormancy checks in the shipped
+/// examples are written against, and it is short enough that the log of
+/// a busy building is still a bounded read.
+pub const DEFAULT_UNLOCK_WINDOW_DAYS: u32 = 90;
 
 /// Per-system configuration, from the `[systems.config]` table.
 ///
@@ -105,37 +154,52 @@ use crate::api::{DEFAULT_BASE, DOORS_PATH, USER_GROUPS_PATH, USERS_PATH};
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
   /// The environment variable holding the console's API token.
-  pub credentials_env: String,
+  pub credentials_env:    String,
   /// The console's address and the Access API port. The default is the
   /// address a fresh console ships with; a deployment should name its
   /// own.
-  pub base_url:        Option<String>,
+  pub base_url:           Option<String>,
   /// Collect user groups and their membership. On by default — it is
   /// one call per group, and the alternative is an overlay that cannot
   /// answer a group question at all.
-  pub groups:          bool,
+  pub groups:             bool,
+  /// Read the console's door-opening log, so each account carries the
+  /// date it last opened a door. On by default, for the same reason as
+  /// `groups`: without it the overlay cannot answer a dormancy question
+  /// on this system at all.
+  ///
+  /// It is the one read whose cost follows door traffic rather than
+  /// headcount — a busy building is many pages — so a console that is
+  /// swept often and read hard is the one to turn this off on.
+  pub unlock_activity:    bool,
+  /// How far back the door-opening log is read, in days. The window is
+  /// also what a null `last_unlock_at` means: not "never", but "not in
+  /// this many days", which is why it reaches the overlay beside it.
+  pub unlock_window_days: u32,
   /// A PEM file holding the console's CA certificate chain, so the host
   /// can trust a console signed by a private CA. Absent means the public
   /// roots only, which is what a console behind a properly issued
   /// certificate needs.
-  pub ca_cert:         Option<String>,
+  pub ca_cert:            Option<String>,
   /// Stop verifying the console's certificate. Off by default.
   ///
   /// A last resort for a console that presents a self-signed leaf
   /// `rustls` will not accept as a trust anchor and offers no CA to pin.
   /// `ca_cert` is strictly better when a certificate exists to trust;
   /// this only gives up knowing which host answered, not read-only.
-  pub tls_insecure:    bool,
+  pub tls_insecure:       bool,
 }
 
 impl Default for Config {
   fn default() -> Self {
     Self {
-      credentials_env: "OVERLORD_UNIFI_ACCESS_TOKEN".to_owned(),
-      base_url:        None,
-      groups:          true,
-      ca_cert:         None,
-      tls_insecure:    false,
+      credentials_env:    "OVERLORD_UNIFI_ACCESS_TOKEN".to_owned(),
+      base_url:           None,
+      groups:             true,
+      unlock_activity:    true,
+      unlock_window_days: DEFAULT_UNLOCK_WINDOW_DAYS,
+      ca_cert:            None,
+      tls_insecure:       false,
     }
   }
 }
@@ -211,10 +275,15 @@ impl Connector for UnifiAccessConnector {
 
   fn system_kind(&self) -> SystemKind { SystemKind::Sso }
 
-  /// Four read endpoints, each with the reason it is needed. This is
+  /// Five read endpoints, each with the reason it is needed. This is
   /// the whole of what the connector can reach; every mutating endpoint
   /// the developer API offers — unlock, assign, delete — fails closed
   /// because no allowlist entry names it.
+  ///
+  /// The system log is the one `POST`, and it is a read: the topic and
+  /// the time window are a filter document the vendor takes in the
+  /// body. `ReadMethod` still has no mutating variant, so the `PUT`
+  /// that opens a door remains unnameable.
   fn allowlist(&self) -> Vec<Allow> {
     vec![
       Allow::get(USERS_PATH, "enumerate accounts and their access"),
@@ -223,6 +292,10 @@ impl Connector for UnifiAccessConnector {
       Allow::get(
         &format!("{USER_GROUPS_PATH}/*/users/all"),
         "group membership, for role checks",
+      ),
+      Allow::post(
+        SYSTEM_LOGS_PATH,
+        "door openings, to date each account's last unlock",
       ),
     ]
   }
@@ -336,11 +409,34 @@ impl Connector for UnifiAccessConnector {
     };
     incomplete.extend(group_problems);
 
+    // The door-opening log. Unlike the reads above it is withheld
+    // whole when anything goes wrong, because a half-read log looks
+    // exactly like a console where half the badges stopped being used.
+    let (unlocks, unlock_problems) = if cfg.unlock_activity {
+      collect_unlocks(http, &cfg, ctx, &door_names).await
+    } else {
+      (None, Vec::new())
+    };
+    incomplete.extend(unlock_problems);
+    if let Some(unlocks) = &unlocks {
+      info!(
+        system = %ctx.system,
+        accounts = unlocks.last.len(),
+        window_days = unlocks.window_days,
+        "door openings read"
+      );
+    }
+
     let observations = users
       .items
       .iter()
       .map(|user| {
-        Observation::new(envelope(user, memberships.as_ref(), &door_names))
+        Observation::new(envelope(
+          user,
+          memberships.as_ref(),
+          &door_names,
+          unlocks.as_ref(),
+        ))
       })
       .collect();
 
@@ -370,6 +466,7 @@ fn envelope(
   user: &Value,
   memberships: Option<&BTreeMap<String, Vec<Value>>>,
   door_names: &BTreeMap<String, String>,
+  unlocks: Option<&Unlocks>,
 ) -> Value {
   let mut out = serde_json::Map::new();
   out.insert("user".to_owned(), redacted_user(user));
@@ -392,6 +489,25 @@ fn envelope(
       "groups".to_owned(),
       Value::Array(by_user.get(id).cloned().unwrap_or_default()),
     );
+  }
+
+  // A date has no absent form an overlay can read — a field that was
+  // never collected and one that was collected and found nothing both
+  // arrive as null — so the knownness is carried as its own boolean
+  // rather than inferred from the date. It is always present, so a
+  // check can lean on it.
+  out.insert(
+    "unlock_activity_known".to_owned(),
+    Value::Bool(unlocks.is_some()),
+  );
+  if let Some(unlocks) = unlocks {
+    // What the null means, for a check that has to say how stale is
+    // stale. Beyond this horizon the log was not asked about.
+    out.insert("unlock_window_days".to_owned(), json!(unlocks.window_days));
+    let id = user.get("id").and_then(Value::as_str).unwrap_or_default();
+    if let Some(last) = unlocks.last.get(id) {
+      out.insert("last_unlock".to_owned(), last.clone());
+    }
   }
 
   Value::Object(out)
@@ -554,6 +670,218 @@ fn door_names(doors: &api::Paged) -> BTreeMap<String, String> {
     .collect()
 }
 
+/// The door-opening log, reduced to the one fact per account an overlay
+/// asks for.
+///
+/// The log itself is not kept. It is a stream of building traffic —
+/// every badge tap, every door, every hour — and §2 keeps the fact
+/// stream forever in plaintext; recording it per sweep would turn
+/// overlord into a movement log of the people who work there. What
+/// survives is the most recent opening per account, which is what a
+/// dormancy question needs and the least that answers it.
+#[derive(Debug)]
+struct Unlocks {
+  /// How far back the log was read. A missing entry below means "no
+  /// opening in this many days", not "never".
+  window_days: u32,
+  /// Account id → its most recent opening within the window.
+  last:        BTreeMap<String, Value>,
+}
+
+/// Read the door-opening log and reduce it to a last opening per
+/// account.
+///
+/// Returns `None` for the view whenever the log is anything less than
+/// whole, and a reason beside it. This is stricter than the group and
+/// door reads, deliberately: those degrade a name or a list, and an
+/// overlay missing a group name still knows the account exists. A
+/// partial log degrades the *meaning* of every account it did not
+/// reach, because "not in these pages" and "did not open a door" are
+/// indistinguishable once the pages are gone — and the check the field
+/// exists for fires on the null.
+///
+/// The window ends at the sweep's `started_at` rather than at a wall
+/// clock: SPEC.md section 13 gives a sweep one clock, and a connector
+/// that read its own would make two sweeps of the same console
+/// disagree about what "90 days" was.
+async fn collect_unlocks(
+  http: &RestrictedHttp,
+  cfg: &Config,
+  ctx: &ObserveCtx,
+  door_names: &BTreeMap<String, String>,
+) -> (Option<Unlocks>, Vec<String>) {
+  let until = ctx.started_at;
+  let since = until.minus_days(i64::from(cfg.unlock_window_days));
+  ctx.progress.say("reading door openings");
+  let log = api::door_openings(
+    http,
+    since.as_jiff().as_second(),
+    until.as_jiff().as_second(),
+    &ctx.progress,
+  )
+  .await;
+
+  if let Some(reason) = &log.incomplete {
+    warn!(
+      system = %ctx.system,
+      reason,
+      "the door-opening log was not read whole; last-unlock dates are withheld"
+    );
+    return (None, vec![format!(
+      "{reason}; every account's last unlock is withheld, because a partial \
+       log cannot tell an account that opened no door from one whose openings \
+       were in the pages that did not arrive"
+    )]);
+  }
+
+  let mut last: BTreeMap<String, Value> = BTreeMap::new();
+  let mut at_by_actor: BTreeMap<String, Timestamp> = BTreeMap::new();
+  let mut undated = 0_usize;
+
+  for hit in &log.items {
+    // The log wraps each entry in the search index's `_source`; a
+    // console that sends the entry bare is read the same way.
+    let event = hit.get("_source").unwrap_or(hit);
+    if !opened(event) {
+      continue;
+    }
+    let Some(actor) = event
+      .get("actor")
+      .and_then(|a| a.get("id"))
+      .and_then(Value::as_str)
+      .filter(|id| !id.is_empty())
+    else {
+      continue;
+    };
+    let Some(at) = opened_at(event) else {
+      undated += 1;
+      continue;
+    };
+    // Newest wins, by comparison rather than by position. A console
+    // that answers newest-first would make the first entry per actor
+    // the right one, but that ordering is the vendor's to change and
+    // nothing announces it when it does — and the way that failure
+    // would show up is as a wrong date nobody has reason to doubt.
+    if at_by_actor.get(actor).is_some_and(|seen| *seen >= at) {
+      continue;
+    }
+    at_by_actor.insert(actor.to_owned(), at);
+    last.insert(
+      actor.to_owned(),
+      json!({
+        "at":     at.to_string(),
+        "door":   opened_door(event, door_names),
+        "via":    event.pointer("/authentication/credential_provider"),
+        "result": event.pointer("/event/result"),
+      }),
+    );
+  }
+
+  let mut problems = Vec::new();
+  if undated > 0 {
+    // A dated log is the whole point; entries without a usable time
+    // are dropped rather than guessed at, and the sweep says how many.
+    warn!(
+      system = %ctx.system,
+      entries = undated,
+      "door openings carried no readable time"
+    );
+    problems.push(format!(
+      "{undated} of {} log entries carried no readable time and were not \
+       counted towards a last unlock",
+      log.items.len()
+    ));
+  }
+
+  (
+    Some(Unlocks {
+      window_days: cfg.unlock_window_days,
+      last,
+    }),
+    problems,
+  )
+}
+
+/// Whether this log entry is a door that opened, rather than one that
+/// refused to.
+///
+/// The topic records both: a refused badge is an access event too. Only
+/// an opening is activity — a deactivated card tapped daily at a door
+/// that never opens is not a sign of use.
+///
+/// The test is for a refusal rather than for a grant, because the
+/// wording of a success is the vendor's to change and the cost of the
+/// two mistakes is not symmetric. Counting an unknown refusal as an
+/// opening makes one account look active; failing to recognize a
+/// renamed success would make every account in the building look
+/// dormant at once.
+fn opened(event: &Value) -> bool {
+  let result = event
+    .pointer("/event/result")
+    .and_then(Value::as_str)
+    .unwrap_or_default()
+    .to_ascii_uppercase();
+  !["DENIED", "DENY", "BLOCK", "REJECT", "FAIL"]
+    .iter()
+    .any(|refusal| result.contains(refusal))
+}
+
+/// When the opening happened.
+///
+/// `@timestamp` is preferred because it is already ISO-8601 and needs
+/// no unit guessed. `event.published` is the fallback and is an epoch
+/// integer: consoles send it in milliseconds, but the field is bare and
+/// a build that sends seconds would otherwise date every opening to
+/// 1970. The two are ten orders of magnitude apart, so the magnitude
+/// settles it — anything that would land before 1973 read as
+/// milliseconds is seconds.
+fn opened_at(event: &Value) -> Option<Timestamp> {
+  if let Some(at) = event
+    .get("@timestamp")
+    .and_then(Value::as_str)
+    .and_then(|s| s.parse::<Timestamp>().ok())
+  {
+    return Some(at);
+  }
+  /// 1973-03-03 as milliseconds; below it, the number is seconds.
+  const SECONDS_BELOW: i64 = 100_000_000_000;
+  let published = event.pointer("/event/published").and_then(Value::as_i64)?;
+  let millis = if published.abs() < SECONDS_BELOW {
+    published.checked_mul(1000)?
+  } else {
+    published
+  };
+  Timestamp::from_unix_millis(millis)
+}
+
+/// Which door opened, named from the console's door list where one was
+/// read and from the log entry's own label otherwise.
+///
+/// The entry's targets are the door, the reader, and sometimes the
+/// device; only the door is an entitlement, so only the door is kept.
+fn opened_door(event: &Value, door_names: &BTreeMap<String, String>) -> Value {
+  let Some(door) =
+    event
+      .get("target")
+      .and_then(Value::as_array)
+      .and_then(|targets| {
+        targets
+          .iter()
+          .find(|t| t.get("type").and_then(Value::as_str) == Some("door"))
+      })
+  else {
+    return Value::Null;
+  };
+  let id = door.get("id").and_then(Value::as_str);
+  let name = id.and_then(|id| door_names.get(id).cloned()).or_else(|| {
+    door
+      .get("display_name")
+      .and_then(Value::as_str)
+      .map(ToOwned::to_owned)
+  });
+  json!({ "id": id, "name": name })
+}
+
 /// Enumerate groups and invert their membership onto accounts.
 ///
 /// Returns `None` for the membership map when groups could not be read
@@ -663,7 +991,7 @@ mod tests {
 
   #[test]
   fn credential_tokens_never_reach_the_fact_stream() {
-    let raw = envelope(&sample_user(), None, &BTreeMap::new());
+    let raw = envelope(&sample_user(), None, &BTreeMap::new(), None);
     let text = raw.to_string();
     assert!(!text.contains("pin-secret"), "{text}");
     assert!(!text.contains("nfc-secret"), "{text}");
@@ -691,7 +1019,8 @@ mod tests {
       assert_eq!(has_pin(&user), expected, "{pin}");
       // Whatever the shape, the token itself never survives.
       assert!(
-        envelope(&user, None, &BTreeMap::new())["user"]["pin_code"].is_null()
+        envelope(&user, None, &BTreeMap::new(), None)["user"]["pin_code"]
+          .is_null()
       );
     }
     assert!(!has_pin(&json!({ "id": "u-1" })));
@@ -708,14 +1037,17 @@ mod tests {
       "access_policy_ids": ["p-1"]
     });
     assert!(policies_unreadable(&user));
-    let raw = envelope(&user, None, &BTreeMap::new());
+    let raw = envelope(&user, None, &BTreeMap::new(), None);
     assert!(raw.get("doors").is_none(), "{raw}");
 
     // An account with no policies at all is genuinely granted nothing,
     // and that is an empty list rather than an absence.
     let none = json!({ "id": "u-2", "access_policy_ids": [] });
     assert!(!policies_unreadable(&none));
-    assert_eq!(envelope(&none, None, &BTreeMap::new())["doors"], json!([]));
+    assert_eq!(
+      envelope(&none, None, &BTreeMap::new(), None)["doors"],
+      json!([])
+    );
   }
 
   #[test]
@@ -724,7 +1056,7 @@ mod tests {
       [("door-1".to_owned(), "Front Door".to_owned())]
         .into_iter()
         .collect();
-    let raw = envelope(&sample_user(), None, &names);
+    let raw = envelope(&sample_user(), None, &names, None);
     assert_eq!(raw["doors"][0]["id"], json!("door-1"));
     assert_eq!(raw["doors"][0]["name"], json!("Front Door"));
     assert_eq!(raw["doors"][0]["type"], json!("door"));
@@ -742,6 +1074,10 @@ mod tests {
       ReadMethod::Get,
       "/api/v1/developer/user_groups/g-1/users/all"
     ));
+    // The log is a read that travels as a POST; it is allowed as one,
+    // and only as one.
+    assert!(http.permits(ReadMethod::Post, SYSTEM_LOGS_PATH));
+    assert!(!http.permits(ReadMethod::Get, SYSTEM_LOGS_PATH));
 
     // Everything the developer API offers that overlord did not ask
     // for. Unlocking a door is a PUT, which `ReadMethod` cannot even
@@ -763,7 +1099,7 @@ mod tests {
     let n = rs
       .apply(
         &SystemId::new("access-hq"),
-        &envelope(&sample_user(), None, &BTreeMap::new()),
+        &envelope(&sample_user(), None, &BTreeMap::new(), None),
       )
       .unwrap();
     assert!(n.warnings.is_empty(), "{:?}", n.warnings);
@@ -781,6 +1117,110 @@ mod tests {
     assert_eq!(r.get("doors").type_name(), "list");
     // Not collected is null, and null is not "no groups".
     assert_eq!(r.get("groups"), CoreValue::Null);
+    // Nor "no unlock": the boolean is what says the log was not read.
+    assert_eq!(r.get("unlock_activity_known"), CoreValue::Bool(false));
+    assert_eq!(r.get("last_unlock_at"), CoreValue::Null);
+  }
+
+  #[test]
+  fn an_account_with_no_opening_in_the_window_is_known_and_dateless() {
+    // The distinction the boolean exists for: the log *was* read, and
+    // this account is not in it. That is a finding, not a gap.
+    let unlocks = Unlocks {
+      window_days: 90,
+      last:        BTreeMap::new(),
+    };
+    let raw = envelope(&sample_user(), None, &BTreeMap::new(), Some(&unlocks));
+    assert_eq!(raw["unlock_activity_known"], json!(true));
+    assert!(raw.get("last_unlock").is_none(), "{raw}");
+
+    let rs = UnifiAccessConnector::new().default_ruleset(&ctx(Value::Null));
+    let r = rs.apply(&SystemId::new("access-hq"), &raw).unwrap().record;
+    assert_eq!(r.get("unlock_activity_known"), CoreValue::Bool(true));
+    assert_eq!(r.get("last_unlock_at"), CoreValue::Null);
+    assert_eq!(r.get("unlock_window_days").type_name(), "number");
+  }
+
+  #[test]
+  fn a_refused_badge_is_not_an_opening() {
+    // A deactivated card tapped daily at a door that never opens is
+    // not a sign of use.
+    for result in [
+      "ACCESS_DENIED",
+      "access_denied",
+      "BLOCKED",
+      "REJECTED",
+      "AUTH_FAILED",
+    ] {
+      assert!(
+        !opened(&json!({ "event": { "result": result } })),
+        "{result}"
+      );
+    }
+    // And a success — including a wording the vendor has not invented
+    // yet — is. Failing open here costs one account that looks active;
+    // failing closed would make the whole building look dormant.
+    for result in ["ACCESS_GRANTED", "UNLOCKED", "SOMETHING_NEW", ""] {
+      assert!(
+        opened(&json!({ "event": { "result": result } })),
+        "{result}"
+      );
+    }
+    assert!(opened(&json!({ "actor": { "id": "u-1" } })));
+  }
+
+  #[test]
+  fn an_opening_is_dated_from_the_string_or_from_the_epoch_beside_it() {
+    let want: Timestamp = "2026-01-09T23:06:40Z".parse().unwrap();
+
+    // The ISO string wins when it is there.
+    assert_eq!(
+      opened_at(&json!({
+        "@timestamp": "2026-01-09T23:06:40Z",
+        "event": { "published": 1_768_000_000_000_i64 }
+      })),
+      Some(want)
+    );
+    // Milliseconds, the shape consoles send.
+    assert_eq!(
+      opened_at(&json!({ "event": { "published": 1_768_000_000_000_i64 } })),
+      Some(want)
+    );
+    // Seconds, from a build that sends the field bare. Reading this as
+    // milliseconds would date every opening to 1970 and call the whole
+    // console dormant.
+    assert_eq!(
+      opened_at(&json!({ "event": { "published": 1_768_000_000_i64 } })),
+      Some(want)
+    );
+    // An entry with no time at all is dropped rather than guessed at.
+    assert_eq!(opened_at(&json!({ "actor": { "id": "u-1" } })), None);
+    assert_eq!(opened_at(&json!({ "@timestamp": "not a time" })), None);
+  }
+
+  #[test]
+  fn an_opening_names_its_door_and_ignores_the_reader_beside_it() {
+    let names: BTreeMap<String, String> =
+      [("door-1".to_owned(), "Front Door".to_owned())]
+        .into_iter()
+        .collect();
+    let event = json!({
+      "target": [
+        { "id": "dev-9", "type": "device", "display_name": "Reader 9" },
+        { "id": "door-1", "type": "door", "display_name": "stale name" }
+      ]
+    });
+    // The door list is the naming authority; the log's own label is the
+    // fallback for a door the list did not carry.
+    assert_eq!(
+      opened_door(&event, &names),
+      json!({ "id": "door-1", "name": "Front Door" })
+    );
+    assert_eq!(
+      opened_door(&event, &BTreeMap::new()),
+      json!({ "id": "door-1", "name": "stale name" })
+    );
+    assert_eq!(opened_door(&json!({ "target": [] }), &names), Value::Null);
   }
 
   #[test]
@@ -797,7 +1237,7 @@ mod tests {
       let n = rs
         .apply(
           &SystemId::new("access-hq"),
-          &envelope(&user, None, &BTreeMap::new()),
+          &envelope(&user, None, &BTreeMap::new(), None),
         )
         .unwrap();
       assert_eq!(n.record.status, expected, "{raw}");

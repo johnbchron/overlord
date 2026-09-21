@@ -425,6 +425,40 @@ impl RestrictedHttp {
     self.send(self.client.post(url).form(form), path).await
   }
 
+  /// POST a JSON body and parse the response as JSON.
+  ///
+  /// The sibling of [`Self::post_form`], for the other kind of vendor
+  /// endpoint that reads through a `POST`: a log or search API whose
+  /// query — a topic, a time window, a filter — is too structured for a
+  /// query string, so the vendor takes it as a document. It reads; it
+  /// changes nothing in the system being observed. The endpoint still
+  /// has to be allowlisted, and [`ReadMethod`] still cannot name a
+  /// mutating method.
+  ///
+  /// `query` is appended to the URL as well, because these endpoints
+  /// page through the query string while the filter travels in the
+  /// body.
+  ///
+  /// # Errors
+  /// As [`Self::json`].
+  pub async fn post_json(
+    &self,
+    path: &str,
+    query: &[(&str, String)],
+    body: &serde_json::Value,
+  ) -> Result<serde_json::Value, ConnectorError> {
+    let mut url = self.check(ReadMethod::Post, path)?;
+    for (k, v) in query {
+      url.query_pairs_mut().append_pair(k, v);
+    }
+    self.progress.report(ProgressEvent::note(request_note(
+      ReadMethod::Post,
+      path,
+      query,
+    )));
+    self.send(self.client.post(url).json(body), path).await
+  }
+
   /// Allowlist check and URL resolution, before anything is sent.
   fn check(
     &self,

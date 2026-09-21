@@ -28,6 +28,14 @@
     "access_policy_ids": { "path": "user.access_policy_ids", "as": "list" },
     "access_policies": { "path": "user.access_policies", "as": "list" },
     "doors": { "path": "doors", "as": "list" },
-    "groups": { "path": "groups", "as": "list" }
+    "groups": { "path": "groups", "as": "list" },
+    "last_unlock_at": { "path": "last_unlock.at", "as": "timestamp" },
+    "last_unlock_door": { "path": "last_unlock.door.name", "as": "string" },
+    "last_unlock_via": { "path": "last_unlock.via", "as": "string" },
+    "unlock_activity_known": {
+      "path": "unlock_activity_known",
+      "as": "boolean"
+    },
+    "unlock_window_days": { "path": "unlock_window_days", "as": "number" }
   }
 }

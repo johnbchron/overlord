@@ -9,9 +9,11 @@
 #
 # The token is a bearer credential and comes from the environment,
 # never from this file (SPEC.md section 14). It is the whole of what
-# overlord can do to the console: overlord reads four endpoints — users,
-# doors, user groups, and one group's members — and cannot name a
-# mutating HTTP method at all.
+# overlord can do to the console: overlord reads five endpoints — users,
+# doors, user groups, one group's members, and the door-opening log —
+# and cannot name a mutating HTTP method at all. The log is the one
+# POST, because the vendor takes its topic and time window as a body;
+# it still only reads.
 #
 # The console serves the Access API on port 12445 with a certificate no
 # public root vouches for, so the first sweep fails with "invalid peer
@@ -58,6 +60,24 @@ credentials_env = "OVERLORD_UNIFI_ACCESS_TOKEN"
 # sweep of a group-heavy console faster, at the cost of an overlay that
 # cannot answer a group question at all.
 groups = true
+
+# Read the door-opening log, so every account carries the date it last
+# opened a door. This is what makes a dormancy check possible on a
+# console: a badge that still opens the building is the access
+# equivalent of a login.
+#
+# It is the one read whose cost follows door traffic rather than
+# headcount, so a busy building swept often is where turning it off
+# pays. With it off, `unlock_activity_known` is false on every account
+# and `last_unlock_at` is null — which is not the same as "nobody has
+# been in", and a check should say `unlock_activity_known and …` so it
+# cannot mistake the two.
+unlock_activity = true
+
+# How far back the log is read. This is also what a null
+# `last_unlock_at` means: not "never", but "not in this many days". It
+# reaches the overlay as `unlock_window_days` so a check can say which.
+unlock_window_days = 90
 
 # The console's CA certificate chain, as a PEM file. Every certificate
 # in the file is trusted, so capture the whole chain when the console

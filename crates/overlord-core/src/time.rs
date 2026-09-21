@@ -28,6 +28,20 @@ impl Timestamp {
   #[must_use]
   pub const fn as_jiff(self) -> jiff::Timestamp { self.0 }
 
+  /// An instant from a Unix epoch count in milliseconds.
+  ///
+  /// Vendor event logs date their entries with an epoch integer rather
+  /// than a string, and the conversion has to live here: `jiff` is
+  /// wrapped by this type on purpose, so a connector cannot name it.
+  ///
+  /// `None` for a count outside the range a timestamp can hold, which
+  /// is a field that is not a time rather than a time overlord should
+  /// invent one for.
+  #[must_use]
+  pub fn from_unix_millis(millis: i64) -> Option<Self> {
+    jiff::Timestamp::from_millisecond(millis).ok().map(Self)
+  }
+
   /// This instant minus `days`, for the expression language's
   /// `days_ago(n)` (SPEC.md section 7).
   ///
@@ -141,6 +155,19 @@ mod tests {
     );
     assert_eq!(earlier.to_string().len(), later.to_string().len());
     assert_eq!(ts(&later.to_string()), later, "and still round-trip");
+  }
+
+  #[test]
+  fn an_epoch_count_becomes_the_same_instant_a_string_would() {
+    assert_eq!(
+      Timestamp::from_unix_millis(1_768_000_000_000),
+      Some(ts("2026-01-09T23:06:40Z"))
+    );
+  }
+
+  #[test]
+  fn an_epoch_count_no_timestamp_can_hold_is_not_a_time() {
+    assert_eq!(Timestamp::from_unix_millis(i64::MAX), None);
   }
 
   #[test]

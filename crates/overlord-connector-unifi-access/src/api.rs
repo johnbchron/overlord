@@ -1,14 +1,19 @@
 //! Reading the UniFi Access developer API.
 //!
-//! Everything here is a `GET`. The developer API answers with a uniform
-//! envelope — `{"code": "SUCCESS", "msg": …, "data": …}` — and a list
-//! endpoint that pages carries a `pagination` sibling. That sibling is
-//! the only evidence that an endpoint pages at all, so both readers are
-//! built on it: [`paged`] stops at the first page without one, and
-//! [`list`] reports a truncated read when one appears. An endpoint that
-//! answers with its whole collection repeats that collection for every
-//! `page_num` and never sends an empty page, so a reader that counted
-//! its own pages would collect the same rows until it gave up.
+//! Everything here reads. All but one endpoint is a `GET`; the system
+//! log is a `POST`, because its query — a topic and a time window — is
+//! a document the vendor takes in the body, and reading a log changes
+//! nothing.
+//!
+//! The developer API answers with a uniform envelope — `{"code":
+//! "SUCCESS", "msg": …, "data": …}` — and a list endpoint that pages
+//! carries a `pagination` sibling. That sibling is the only evidence
+//! that an endpoint pages at all, so both readers are built on it:
+//! [`paged`] stops at the first page without one, and [`list`] reports
+//! a truncated read when one appears. An endpoint that answers with its
+//! whole collection repeats that collection for every `page_num` and
+//! never sends an empty page, so a reader that counted its own pages
+//! would collect the same rows until it gave up.
 //!
 //! Like the Workspace connector, a page that failed mid-enumeration is
 //! a truncated read rather than an empty one: a vendor that rate-limits
@@ -24,7 +29,7 @@
 use std::collections::BTreeSet;
 
 use overlord_connect::{ConnectorError, Progress, ReadMethod, RestrictedHttp};
-use serde_json::Value;
+use serde_json::{Value, json};
 use tracing::warn;
 
 /// UniFi's default console address and the port the Access developer
@@ -35,6 +40,13 @@ pub const DEFAULT_BASE: &str = "https://192.168.1.1:12445/";
 pub const USERS_PATH: &str = "/api/v1/developer/users";
 pub const DOORS_PATH: &str = "/api/v1/developer/doors";
 pub const USER_GROUPS_PATH: &str = "/api/v1/developer/user_groups";
+pub const SYSTEM_LOGS_PATH: &str = "/api/v1/developer/system/logs";
+
+/// The system-log topic that records a door being opened — who opened
+/// it, which door, and with which credential. It is the only topic this
+/// connector asks for: the others carry device health, admin actions
+/// and visitor traffic, none of which is an account's entitlement.
+pub const DOOR_OPENINGS_TOPIC: &str = "door_openings";
 
 /// How many rows to ask for at once. UniFi defaults to 25 and accepts
 /// more; a value this size keeps a large tenant to a handful of round
@@ -74,8 +86,12 @@ async fn page(
   http: &RestrictedHttp,
   path: &str,
   query: &[(&str, String)],
+  post: Option<&Value>,
 ) -> Result<(Vec<Value>, Option<u64>), ConnectorError> {
-  let body = http.json(ReadMethod::Get, path, query).await?;
+  let body = match post {
+    None => http.json(ReadMethod::Get, path, query).await?,
+    Some(filter) => http.post_json(path, query, filter).await?,
+  };
 
   if let Some(code) = body.get("code").and_then(Value::as_str)
     && code != "SUCCESS"
@@ -84,12 +100,30 @@ async fn page(
     return Err(ConnectorError::Other(format!("{path}: {code} {msg}")));
   }
 
-  let items = match body.get("data") {
-    Some(Value::Array(items)) => items.clone(),
-    // A null or absent `data` is an empty page, not a failure. A
-    // non-array, non-null `data` means this is not a list endpoint and
-    // the caller is being told so.
-    None | Some(Value::Null) => Vec::new(),
+  // `data` is the collection itself on the directory endpoints. The
+  // system log is the exception: it answers with an object whose `hits`
+  // holds the rows, and it carries its own `pagination` inside that
+  // object rather than beside it. Both shapes are read here so no
+  // caller has to know which one it asked for. Anything else is still
+  // refused: a non-list `data` with no `hits` means this is not a list
+  // endpoint, and the caller is told so rather than handed nothing.
+  let data = body.get("data");
+  let (items, nested) = match data {
+    Some(Value::Array(items)) => (items.clone(), None),
+    Some(Value::Object(obj)) if obj.contains_key("hits") => {
+      let hits = match obj.get("hits") {
+        Some(Value::Array(hits)) => hits.clone(),
+        None | Some(Value::Null) => Vec::new(),
+        Some(other) => {
+          return Err(ConnectorError::Decode(format!(
+            "{path}: expected hits to be a list, got {other}"
+          )));
+        }
+      };
+      (hits, obj.get("pagination"))
+    }
+    // A null or absent `data` is an empty page, not a failure.
+    None | Some(Value::Null) => (Vec::new(), None),
     Some(other) => {
       return Err(ConnectorError::Decode(format!(
         "{path}: expected a list, got {other}"
@@ -97,8 +131,8 @@ async fn page(
     }
   };
 
-  let total = body
-    .get("pagination")
+  let total = nested
+    .or_else(|| body.get("pagination"))
     .and_then(|p| p.get("total"))
     .and_then(Value::as_u64);
   Ok((items, total))
@@ -118,10 +152,14 @@ async fn page(
 /// `label` names what is being read for the sweep's progress screen;
 /// each page is reported as it lands, because a large console is many
 /// round trips and silence for all of them is the wrong feedback.
+///
+/// `post` carries the filter document for an endpoint that reads
+/// through a `POST`; `None` is the usual `GET`.
 pub async fn paged(
   http: &RestrictedHttp,
   path: &str,
   query: &[(&str, String)],
+  post: Option<&Value>,
   progress: &Progress,
   label: &str,
 ) -> Paged {
@@ -134,7 +172,7 @@ pub async fn paged(
     q.push(("page_num", page_num.to_string()));
     q.push(("page_size", PAGE_SIZE.to_owned()));
 
-    let (items, total) = match page(http, path, &q).await {
+    let (items, total) = match page(http, path, &q, post).await {
       Ok(pair) => pair,
       Err(e) => {
         warn!(path, error = %e, "enumeration stopped short");
@@ -205,10 +243,16 @@ pub async fn paged(
 /// developer API keys every resource by `id`; anything without one is
 /// compared whole.
 fn identity(item: &Value) -> String {
-  match item.get("id").and_then(Value::as_str) {
-    Some(id) => format!("id:{id}"),
-    None => format!("row:{item}"),
+  // A log entry has no `id` of its own and carries the search index's
+  // `_id` instead. Without it, two openings that happen to render
+  // identically would collapse into one — and, worse, a page of them
+  // would look like a console repeating itself.
+  for key in ["id", "_id"] {
+    if let Some(id) = item.get(key).and_then(Value::as_str) {
+      return format!("{key}:{id}");
+    }
   }
+  format!("row:{item}")
 }
 
 /// Read a list endpoint in one body.
@@ -224,7 +268,7 @@ pub async fn list(
   progress: &Progress,
   label: &str,
 ) -> Paged {
-  match page(http, path, &[]).await {
+  match page(http, path, &[], None).await {
     Ok((items, total)) => {
       progress.counted(
         format!("{label}: {} read", items.len()),
@@ -265,6 +309,7 @@ pub async fn users(http: &RestrictedHttp, progress: &Progress) -> Paged {
     http,
     USERS_PATH,
     &[("expand[]", "access_policy".to_owned())],
+    None,
     progress,
     "accounts",
   )
@@ -273,7 +318,41 @@ pub async fn users(http: &RestrictedHttp, progress: &Progress) -> Paged {
 
 /// Every door, for naming the resources a policy grants.
 pub async fn doors(http: &RestrictedHttp, progress: &Progress) -> Paged {
-  paged(http, DOORS_PATH, &[], progress, "doors").await
+  paged(http, DOORS_PATH, &[], None, progress, "doors").await
+}
+
+/// Every door opening the console logged between `since` and `until`,
+/// as Unix seconds.
+///
+/// This is the one `POST`, and the one endpoint that is not a
+/// directory: the filter — topic and window — is a document the vendor
+/// takes in the body while the paging stays in the query string. It
+/// reads the log and changes nothing, which is why [`ReadMethod::Post`]
+/// exists.
+///
+/// The window is bounded because the log is the largest thing on a busy
+/// console: it grows with door traffic rather than with headcount, so
+/// an unbounded read would be the whole history of the building.
+pub async fn door_openings(
+  http: &RestrictedHttp,
+  since: i64,
+  until: i64,
+  progress: &Progress,
+) -> Paged {
+  let filter = json!({
+    "topic": DOOR_OPENINGS_TOPIC,
+    "since": since,
+    "until": until,
+  });
+  paged(
+    http,
+    SYSTEM_LOGS_PATH,
+    &[],
+    Some(&filter),
+    progress,
+    "door openings",
+  )
+  .await
 }
 
 /// Every user group.
